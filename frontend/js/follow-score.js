@@ -625,14 +625,6 @@ function flashBeat(accent) {
     }, 120);
   }
 }
-// 起音当场闪一下：告诉用户"这一下我听到了"（判定 60ms 后才出结论）。
-// 跟 flashBeat 的区别：这个是"听到你弹了"，那个是"该弹了"。
-function flashHeard() {
-  const cur = $('cursor');
-  if (!cur) return;
-  cur.style.boxShadow = '0 0 0 3px rgba(26,138,74,.55)';
-  setTimeout(() => { cur.style.boxShadow = ''; }, 160);
-}
 
 // ── 实时诊断：每判一个音/漏一个音就往页面上写一行 ────────────────────────────
 // 为什么要有：出问题时"说不清是什么造成的"。把 期望音 / 时间窗 / 起音时刻与偏差 /
@@ -892,12 +884,6 @@ function micTick() {
     lastOnsetMs = now;
     heardInWindow = true;
     windowTries = 0;
-    // ── 起音当场就给反馈：不等判定 ────────────────────────────────────────
-    // 用户报"有点延迟感"——判定本身要等 60ms 才出结论，但"它听见了"这件事
-    // 可以**立刻**告诉他：光标闪一下 + 一行"听到了"。感知上的延迟就是这么消掉的。
-    flashHeard();
-    $('verdict').className = '';
-    $('verdict').textContent = '听到了，正在判…';
     // 峰值快照：只在**起音这一刻**取一次 170ms 频谱（8192 点，bin 宽 5.9Hz）。
     // 判定只用它 —— 之后的余响、延音、衰减一概不参与（这就是"只处理峰值"）。
     try {
@@ -931,11 +917,10 @@ function micTick() {
     } catch (e) { onsetDiffSpec = null; }
   }
 
-  // 起音之后等多久才判定：原来 90ms。这个数是"延迟感"的主要来源之一
-  // （用户报"有点延迟感，快音第一下还收不到"）—— 压到 60ms：
-  // 判定窗仍然是"判定这一刻往回 170ms"，只是整体往前挪 30ms，
-  // 反馈早 30ms 到，而且"判定中不听新起音"的聋期也短 30ms。
-  if (phase === 'settling' && now - onsetAtMs >= 60) {
+  // 起音之后等多久才判定：**90ms**。
+  // ⚠ 2026-09-22 晚试过压到 60ms（想减延迟），用户实测"弹对但判错、还会漏音，
+  // 比改之前差"——判定窗整体往前挪之后，窗里上一根的音多了一截。已改回 90ms。
+  if (phase === 'settling' && now - onsetAtMs >= 90) {
     phase = 'waiting';
     const sr2 = audio.getRate();
     const riseBinHz = ((audio.getCtx() && audio.getCtx().sampleRate) || 48000) / FLUX_N;
@@ -1535,12 +1520,10 @@ function advanceNote() {
   const gapMs = (nextN && prevNote) ? Math.max(0, (nextN.t - prevNote.t) * 1000) : 200;
   // 连续相同音时把间隔再压缩（否则第二下会被当成余响忽略掉）
   const same = !!(nextN && prevNote && nextN.midi === prevNote.midi);
-  // 冷启期的起点是**拨弦那一刻**（lastOnsetMs），不是"判定这一刻"：
-  // 判定发生在起音后 60ms，从那一刻再往后推，等于每次拨弦后要等 (60+guard) ms 才收新起音，
-  // 快音的第二下（197ms 间隔）就会被吃掉。从拨弦那一刻算，聋期只有 guard。
-  // ⚠ 这一条单独改（不碰"够不够陡"那三条判据）—— 上次一起改会"一下过两个音"。
-  const guardMs = Math.min(160, Math.max(same ? 55 : 70, gapMs * (same ? 0.35 : 0.55)));
-  refractoryUntilMs = Math.max(refractoryUntilMs, lastOnsetMs + guardMs);
+  // ⚠ 这一条也回退了：2026-09-22 晚试过"从拨弦那一刻算"（想缩聋期，帮快音），
+  // 用户实测"有些音弹对判错、偶尔还漏"——从判定那一刻算（下面这行）保守但准。
+  refractoryUntilMs = performance.now()
+    + Math.min(160, Math.max(same ? 55 : 70, gapMs * (same ? 0.35 : 0.55)));
   // 不设延音期：谱面的延音只是"这个音响得久"，不代表你要再弹一次，
   // 也不代表接下来不能判定。判定只跟"你拨了几下"有关。
   noteIdx++;
