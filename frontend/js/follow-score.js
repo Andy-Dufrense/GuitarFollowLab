@@ -11,7 +11,7 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0923-0010';
+const BUILD = '0923-0130';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
@@ -717,13 +717,33 @@ function expectedAtMs(i) {
 let tempoState = [];       // 每个音：'' 待判 | 'ok' | 'bad' | 'miss'
 let tempoCursor = 0;       // 光标（= 当前时间窗所在的音）
 let tempoClosed = -1;      // 已经关窗结算到第几个音
+// 时间轴原点：null = 还没听到第一个音。听到第一下就把整条谱面时间轴**对齐到用户这一下**
+// （用户口径：第一个音以他的起音为准 —— 否则他一上来差半拍，后面就全乱）。
+// 超过这个宽限还没起手，就退回"按理数拍子"的正规时间轴，免得整段卡住。
+const TEMPO_FIRST_GRACE_MS = 4000;
+let tempoOriginMs = null;
+
+// ── 实时诊断：每判一个音/漏一个音就往页面上写一行 ────────────────────────────
+// 为什么要有：出问题时"说不清是什么造成的"。把 期望音 / 时间窗 / 起音时刻与偏差 /
+// 听到的音 / 最后判什么 直接摊在页面上，手机上不用导文件，看一眼（或截图）就知道
+// 是"没听到"、"时间不对"还是"音不对"。最多留 8 行。
+let diagLines = [];
+function diag(line) {
+  diagLines.push(line);
+  if (diagLines.length > 8) diagLines.shift();
+  const el = $('diag');
+  if (el) el.textContent = diagLines.join('\n');
+}
+function resetDiag() { diagLines = []; const el = $('diag'); if (el) el.textContent = ''; }
 const tempoTol = (i) => timingToleranceMs(i);
+// 谱面第 i 个音"该响"的时刻（tempo 专用：带上原点偏移）
+const tempoAt = (i) => expectedAtMs(i) + (tempoOriginMs || 0);
 // 这一刻的起音归到哪个音？不在任何窗口里 → -1（早了/晚了，不算这个音）
 function tempoNoteAt(ms) {
   if (!notes || !notes.length) return -1;
   let best = -1, bestD = Infinity;
   for (let i = Math.max(0, tempoCursor - 2); i < notes.length; i++) {
-    const c = expectedAtMs(i);
+    const c = tempoAt(i);
     if (c - tempoTol(i) > ms + 300) break;      // 后面的音还早，不用看
     if (tempoState[i]) continue;                // 这个音已经判过了
     const d = Math.abs(ms - c);
@@ -736,7 +756,7 @@ function tempoNearestPending(ms) {
   let idx = -1, dev = 0, bestD = Infinity;
   for (let i = Math.max(0, tempoCursor - 2); i < notes.length; i++) {
     if (tempoState[i]) continue;
-    const d = ms - expectedAtMs(i);
+    const d = ms - tempoAt(i);
     if (Math.abs(d) < bestD) { bestD = Math.abs(d); idx = i; dev = d; }
     if (expectedAtMs(i) > ms + 1000) break;
   }
@@ -746,9 +766,14 @@ function tempoNearestPending(ms) {
 function tempoTick(nowMs) {
   if (!notes || !notes.length || phase !== 'waiting') return false;
   const t = nowMs - micStartedAt;
+  // 还没起手：第一个音**等用户**（光标停在第 1 个音上）；宽限过了就退回正规时间轴
+  if (tempoOriginMs == null) {
+    if (t < TEMPO_FIRST_GRACE_MS) return false;
+    tempoOriginMs = 0;
+  }
   // ① 关窗：右边界过了还没判到 → 记错（用户口径：规定时间里没出现理想音就是错）
   while (tempoClosed + 1 < notes.length
-    && t > expectedAtMs(tempoClosed + 1) + tempoTol(tempoClosed + 1)) {
+    && t > tempoAt(tempoClosed + 1) + tempoTol(tempoClosed + 1)) {
     tempoClosed++;
     if (!tempoState[tempoClosed]) {
       tempoState[tempoClosed] = 'miss';
@@ -760,6 +785,9 @@ function tempoTick(nowMs) {
       $('missed').textContent = missed;
       $('bad').textContent = bad;
       markNote(tempoClosed, 'bad');
+      diag(`#${tempoClosed + 1} ${midiToNameOf(cur.midi)}(${cur.string}弦${cur.fret}品)`
+        + ` 窗口 ${((tempoAt(tempoClosed) - tempoTol(tempoClosed)) / 1000).toFixed(2)}`
+        + `~${((tempoAt(tempoClosed) + tempoTol(tempoClosed)) / 1000).toFixed(2)}s 没听到 → 错（漏）`);
       sessionLog.push({
         no: tempoClosed + 1, t: Number((nowMs / 1000).toFixed(3)),
         exp: cur.midi, expName: midiToNameOf(cur.midi), result: 'miss',
@@ -769,7 +797,7 @@ function tempoTick(nowMs) {
   }
   // ② 光标按时间走：落在哪个音的窗口里就指哪个音
   let cur = tempoCursor;
-  while (cur + 1 < notes.length && t >= expectedAtMs(cur + 1) - tempoTol(cur + 1)) cur++;
+  while (cur + 1 < notes.length && t >= tempoAt(cur + 1) - tempoTol(cur + 1)) cur++;
   if (cur !== tempoCursor) {
     tempoCursor = cur;
     noteIdx = cur;
@@ -1135,6 +1163,16 @@ function micTick() {
         // 不往前跳、也不把中间的音一起吃掉：窗口过期是"时钟"那边的事（tempoTick）。
         // 落在窗口外（弹早了/弹晚了）→ 这个起音不算数，等窗口关掉记错。
         const elapsed = onsetAtMs - micStartedAt;
+        // 第一下 = 时间轴原点：把整条谱面时间轴对齐到用户这一下（第一个音以他为准）
+        if (tempoOriginMs == null) {
+          tempoOriginMs = elapsed - expectedAtMs(0);
+          tempoCursor = 0;
+          noteIdx = 0;
+          highlightCurrent();
+          // 节拍器也跟着重新对齐：第 1 拍 = 用户这一下（否则节拍器和谱面时钟差一个起手量）
+          if ($('metro') && $('metro').checked) { stopMetronome(); startMetronome(); }
+          setVerdict(`起手对齐：以这一下为第 1 个音（${midiToNameOf(notes[0].midi)}）`, '');
+        }
         const k = tempoNoteAt(elapsed);
         if (k < 0) {
           // 落在所有时间窗之外（弹早了/弹晚了）→ 这个音**不判**，
@@ -1145,6 +1183,9 @@ function micTick() {
             timingDevs.push(near.dev);
             timingTolMs = tempoTol(near.idx);
             if (near.dev < 0) earlyCount++; else lateCount++;
+            const dir = near.dev < 0 ? '早' : '晚';
+            diag(`起音 ${(elapsed / 1000).toFixed(2)}s 比第${near.idx + 1}个音${dir} `
+              + `${Math.abs(Math.round(near.dev))}ms（容许 ±${Math.round(tempoTol(near.idx))}ms）→ 这一下不算`);
             setVerdict(`这一下比第${near.idx + 1}个音${near.dev < 0 ? '早' : '晚'}了 `
               + `${Math.abs(Math.round(near.dev))}ms（容许 ±${Math.round(tempoTol(near.idx))}ms）`
               + ` —— 那个音按错算，继续`, 'bad');
@@ -1154,7 +1195,8 @@ function micTick() {
         }
         best = k;
         noteIdx = k;             // 只是把"当前音"对齐到这一下；光标仍由时钟驱动
-        devMs = elapsed - expectedAtMs(k);
+        // 偏差要跟"带原点的时间轴"比（起手对齐之后，第一个音的偏差应该≈0）
+        devMs = elapsed - tempoAt(k);
       }
       if (!notes[best]) { stopMic(); return; }
       const exp = notes[best];
@@ -1489,6 +1531,21 @@ function micTick() {
         $('wrongs').textContent = '弹错：' + wrongList.join('、');
       }
       const judgedNo = best + 1;
+      // 实时诊断：这一个音是怎么判的（wait 只看音，tempo 连时间窗和偏差一起给）
+      {
+        const heardName = candBest ? midiToNameOf(candBest.midi) : midiToNameOf(midiP);
+        if (modeKind === 'tempo') {
+          const w = tempoTol(best);
+          diag(`#${judgedNo} ${midiToNameOf(exp.midi)}(${exp.string}弦${exp.fret}品)`
+            + ` 窗口 ${((tempoAt(best) - w) / 1000).toFixed(2)}~${((tempoAt(best) + w) / 1000).toFixed(2)}s`
+            + ` 起音 ${((onsetAtMs - micStartedAt) / 1000).toFixed(2)}s`
+            + (devMs == null ? '' : `(${devMs >= 0 ? '+' : ''}${Math.round(devMs)}ms)`)
+            + ` 听到 ${heardName} → ${pass ? '对' : '错'}`);
+        } else {
+          diag(`#${judgedNo} ${midiToNameOf(exp.midi)}(${exp.string}弦${exp.fret}品)`
+            + ` 听到 ${heardName} ${centsP > 0 ? '+' : ''}${Math.round(centsP)}音分 → ${pass ? '对' : '错'}`);
+        }
+      }
       if (modeKind === 'tempo') {
         // 跟节拍：判完只标记这个音，光标/时间轴继续按时钟走（不推进 noteIdx）
         tempoState[best] = pass ? 'ok' : 'bad';
@@ -1613,6 +1670,8 @@ async function startMic() {
   tempoState = (notes || []).map(() => '');
   tempoCursor = 0;
   tempoClosed = -1;
+  tempoOriginMs = null;
+  resetDiag();
   // 音符加载后重建"光标→谱面"对应表（按**当前选中的声部**）
   if (score) buildTickMap(score, Number($('track') && $('track').value) || 0);
   else await loadChords();
