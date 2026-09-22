@@ -880,6 +880,15 @@ function micTick() {
         // 只有延音在响时，高频是衰减的、电平也在往下走，两条都不成立，就不会被当成新的一下。
         || (repeatSame && hfFlux > 0.10 && lv > lagged * 1.15))
     && now - lastOnsetMs > Math.max(90, CFG.minGapMs);
+  // 起音层逐帧台帐（只在 test-follow-real.mjs 的 VC_ONSET_DEBUG=1 时打）：
+  // 查"这一段为什么没被当起音 / 为什么一下被算成两下"用。对页面没有任何影响。
+  if (globalThis.__vcOnsetDebug && lv > 0.02) {
+    console.log(`[onset] t=${(now / 1000).toFixed(3)} 电平=${lv.toFixed(4)} 上帧=${prevLv.toFixed(4)}`
+      + ` 滞后=${lagged.toFixed(4)} 门限=${strongGate.toFixed(4)} 陡=${sharpEnough ? 'y' : 'n'}`
+      + ` 形状=${shapeFlux.toFixed(3)} 通量=${flux.toFixed(3)} 高频=${hfFlux.toFixed(3)}`
+      + ` 上升=${(lv / (lagged + 1e-9)).toFixed(2)} 重复=${repeatSame ? 'y' : 'n'}`
+      + ` 相位=${phase} 冷却=${now >= refractoryUntilMs ? 'y' : 'n'} → ${onset ? '起音' : ''}`);
+  }
   // ③ **撤掉**"主峰跳变就算新起音"这条。
   // 它本来是想解决"快音的第二下"（换弦换品时电平还没掉、音高先跳），但代价是：
   // 一个长音在响的时候，主峰会随衰减在基频和某个谐波之间来回晃 —— 每晃一下就多算一个音，
