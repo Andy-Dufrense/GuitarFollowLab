@@ -11,7 +11,7 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0923-0500';
+const BUILD = '0923-0600';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
@@ -32,6 +32,8 @@ import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js';
 import { collectScoreSlots, mapSequenceToSlots } from './app/cursor.js';
 // 跟节拍层（状态机 + 拍点 + 提示音）—— 这一层只通过回调跟页面打交道
 import { createTempoLayer } from './app/tempo.js';
+// 实时诊断面板（页面层的一块）：只负责把一行行文字显示到 #diag
+import { diag, resetDiag, initDiag } from './app/diag.js';
 
 let api = null;            // alphaTab 实例（只建一次）
 let score = null;
@@ -224,10 +226,12 @@ function markNote(idx, kind) {
   } catch (e) { /* 定位失败就不标，不影响判定 */ }
 }
 
-function highlightCurrent() {
+// index 省略 = 当前该弹的那个音（noteIdx）；给"起音预览"用时会显式传下一个音
+function highlightCurrent(index = noteIdx) {
   if (!api) return;
   const box = document.getElementById('cursor');
-  const beat = noteBeats[noteIdx];
+  const idx = Math.max(0, Math.min(index, (noteBeats || []).length - 1));
+  const beat = noteBeats[idx];
   // 这个版本的 alphaTab 没有 highlight API（包里的 highlightBeats 出现 0 次），
   // 但提供了布局坐标（boundsLookup）。所以自己算位置、自己画。
   try {
@@ -278,7 +282,7 @@ function highlightCurrent() {
   } catch (e) {
     err('光标定位失败：' + (e.message || e) + '（不影响判定）');
   }
-  try { if (noteTicks[noteIdx] != null) api.tickPosition = noteTicks[noteIdx]; } catch (e) { /* ignore */ }
+  try { if (noteTicks[idx] != null) api.tickPosition = noteTicks[idx]; } catch (e) { /* ignore */ }
 }
 
 // 声部选择：默认只留第一个（旋律），其余静音 —— 不然会听到伴奏的和弦声
@@ -626,18 +630,8 @@ function flashBeat(accent) {
   }
 }
 
-// ── 实时诊断：每判一个音/漏一个音就往页面上写一行 ────────────────────────────
-// 为什么要有：出问题时"说不清是什么造成的"。把 期望音 / 时间窗 / 起音时刻与偏差 /
-// 听到的音 / 最后判什么 直接摊在页面上，手机上不用导文件，看一眼（或截图）就知道
-// 是"没听到"、"时间不对"还是"音不对"。最多留 8 行。
-let diagLines = [];
-function diag(line) {
-  diagLines.push(line);
-  if (diagLines.length > 8) diagLines.shift();
-  const el = $('diag');
-  if (el) el.textContent = diagLines.join('\n');
-}
-function resetDiag() { diagLines = []; const el = $('diag'); if (el) el.textContent = ''; }
+// 诊断面板的实体在 ./app/diag.js（见文件顶部 import）；这里只把 #diag 元素接给它
+initDiag(() => $('diag'));
 // ── 跟节拍层实例（宿主接口）：实体在 ./app/tempo.js，这里只把页面的状态/回调接进去 ──
 let tempoLayer = null;
 function tempo() {
@@ -884,6 +878,12 @@ function micTick() {
     lastOnsetMs = now;
     heardInWindow = true;
     windowTries = 0;
+    // ── 听到了，光标**立刻**往前走一格 ────────────────────────────────────
+    // 用户口径："有没有可能听到了光标就动，判错判对的延迟用户是感觉不到的" —— 可以：
+    // 判定本身还要 90ms 才出结论，但"该弹下一格了"这件事现在就告诉他；
+    // 对/错的结果回来之后只是把那格标绿/标红（markNote），不再挪光标。
+    // （跟节拍模式的光标本来就由时钟驱动，这里只管"等我弹"。）
+    if (modeKind !== 'tempo' && notes && noteIdx + 1 < notes.length) highlightCurrent(noteIdx + 1);
     // 峰值快照：只在**起音这一刻**取一次 170ms 频谱（8192 点，bin 宽 5.9Hz）。
     // 判定只用它 —— 之后的余响、延音、衰减一概不参与（这就是"只处理峰值"）。
     try {
@@ -1001,6 +1001,8 @@ function micTick() {
         // 这一下没通过"像不像一根弦"的关卡 —— 记进台帐，别让它悄无声息地消失
         const last = onsetLog[onsetLog.length - 1];
         if (last) { last.dropped = 'not-a-string'; last.clarity = Number((a.pitch.clarity || 0).toFixed(3)); last.hz = Math.round(a.pitch.hz || 0); }
+        // 这一下不算数（不像琴声）→ 把刚才预览挪过去的光标收回来
+        if (modeKind !== 'tempo') highlightCurrent();
       }
       micTimer = requestAnimationFrame(micTick);
       return;
@@ -1046,64 +1048,64 @@ function micTick() {
             + (pickup ? `　※ 这 ${pickup} 个音是起拍音（拾音），正拍从第 2 小节开始` : ''), '');
           if (pickup) diag(`※ 起拍音 ${pickup} 个（不掐拍子）；正拍 / 提示音从第 2 小节开始`);
         }
-        let k = tempo().noteAt(elapsed);
-        if (k < 0) {
+        // ── 对号：**时间 + 音高**（窗内、弹早了、弹晚了、快音，全都走这一条）──────
+        // 只按时间最近的音对号，到 16 分音符那种地方差一位就整段判错；
+        // 用户"弹在网格前面"时更糟：app 还在按上一格等（导出里 devMs -100~-250、
+        // '听到的音'正好是谱面下一个音，就是这么来的）。
+        // 所以候选取"附近还没判、时间上说得通"的几个音，逐个量一次"自己贴不贴"，
+        // 挑最像的那个；同一音高重复出现时时间近的优先（损失里带了 |时间差|/2）。
+        const N = 8192;
+        const srNow = (audio.getCtx() && audio.getCtx().sampleRate) || 48000;
+        let specE = null;
+        try { specE = spectrumOf(buf.subarray(Math.max(0, buf.length - N))); } catch (e) { specE = null; }
+        // 先按时间取"窗内最近的那个音"（这是老行为，快音段落最稳）；
+        // 只有它不存在（弹早了/弹晚了，落在窗外）时，才让音高来挑附近哪个音。
+        const kIn = tempo().noteAt(elapsed);
+        const curIdx = tempo().cursorIndex();
+        const cands = [];
+        for (let j = Math.max(0, curIdx - 3); j <= Math.min(notes.length - 1, curIdx + 3); j++) {
+          if (tempo().state()[j]) continue;
+          const d = elapsed - tempo().at(j);
+          const ioiJ = notes[j + 1] ? Math.max(60, (notes[j + 1].t - notes[j].t) * 1000) : 400;
+          if (Math.abs(d) > Math.max(tempo().tol(j), ioiJ * 1.2)) continue;
+          cands.push({ j, d, inWin: Math.abs(d) <= tempo().tol(j) });
+        }
+        let pick = -1, pickLoss = Infinity, pickInWin = false;
+        if (specE) {
+          for (const c of cands) {
+            // 窗内的情况只做"微调"：kIn 存在时，只有候选比它更贴（差 > 40）才换
+            if (kIn >= 0 && c.j !== kIn && !c.inWin) continue;
+            const r = judgeNote({ spec: specE, sampleRate: srNow, fftSize: N, expectedMidi: notes[c.j].midi });
+            if (!r.self || !(r.self.mismatch < 250)) continue;
+            const loss = r.self.mismatch + Math.abs(c.d) / 2 + (c.j === kIn ? -40 : 0);
+            if (loss < pickLoss) { pickLoss = loss; pick = c.j; pickInWin = c.inWin; }
+          }
+        }
+        if (pick < 0 && kIn >= 0) { pick = kIn; pickInWin = true; }
+        if (pick < 0) {
+          // 哪儿都对不上：只提示"早了/晚了多少"，那个音会在窗口关掉时按错记
           const near = tempo().nearestPending(elapsed);
-          // 落在时间窗之外：如果离"下一个还没判的音"不算太远（≤1.2 个音距），
-          // **先按那个音判音准**（lateAccept）。音对 → 认下并**把时间轴重新对齐到你这一下**，
-          // 免得"一漏就一路漏、越弹越乱"（用户实测的痛点）；音不对 → 才是真错。
-          const ioi = near.idx >= 0 ? Math.max(60, (notes[near.idx + 1] ? notes[near.idx + 1].t - notes[near.idx].t : 0.4) * 1000) : 400;
-          if (near.idx >= 0 && Math.abs(near.dev) <= ioi * 1.2) {
-            k = near.idx;
-            tempo().setLateAccept(true);
-          } else if (near.idx >= 0 && Math.abs(near.dev) <= tempo().tol(near.idx) * 4) {
-            // 差太多：只提示，不认（那个音会在窗口关掉时按错记）
+          if (near.idx >= 0 && Math.abs(near.dev) <= tempo().tol(near.idx) * 4) {
             timingDevs.push(near.dev);
             timingTolMs = tempo().tol(near.idx);
             if (near.dev < 0) earlyCount++; else lateCount++;
             const dir = near.dev < 0 ? '早' : '晚';
             diag(`起音 ${(elapsed / 1000).toFixed(2)}s 比第${near.idx + 1}个音${dir} `
               + `${Math.abs(Math.round(near.dev))}ms（容许 ±${Math.round(tempo().tol(near.idx))}ms）→ 这一下不算`);
-            micTimer = requestAnimationFrame(micTick);
-            return;
-          } else {
-            micTimer = requestAnimationFrame(micTick);
-            return;
+          }
+          micTimer = requestAnimationFrame(micTick);
+          return;
+        }
+        best = pick;
+        noteIdx = pick;            // 只是把"当前音"对齐到这一下；光标仍由时钟驱动
+        devMs = elapsed - tempo().at(pick);
+        if (!pickInWin) {
+          // 窗外但音对（弹早/弹晚）→ 先认下，判定之后把整条时间轴对齐到你这一下
+          tempo().setLateAccept(true);
+          if (Math.abs(devMs) > tempo().tol(pick)) {
+            diag(`（${devMs < 0 ? '早' : '晚'}了 ${Math.abs(Math.round(devMs))}ms：先按第${pick + 1}个音认下，判定后重新对齐）`);
           }
         }
-        best = k;
-        noteIdx = k;             // 只是把"当前音"对齐到这一下；光标仍由时钟驱动
-        // 偏差要跟"带原点的时间轴"比（起手对齐之后，第一个音的偏差应该≈0）
-        devMs = elapsed - tempo().at(k);
-        // ── 快速段落：用"这一下最像哪个音"来定归属（时间 + 音高）──────────────
-        // 只按时间最近对号，到 16 分音符那种地方**差一位就整段判错**
-        // （用户实测"连续的快节奏音符会判定不过来、导致全错"）。
-        // 这里在附近还没判的 ±3 个音里各量一次"自己贴不贴"，挑最像的那个；
-        // 同一个音高反复出现时（F4 F4 F4）时间近的优先（损失里带了时间差）。
-        try {
-          const N = 8192;
-          const srNow = (audio.getCtx() && audio.getCtx().sampleRate) || 48000;
-          const specE = spectrumOf(buf.subarray(Math.max(0, buf.length - N)));
-          const c0 = Math.max(0, k - 3), c1 = Math.min(notes.length - 1, k + 3);
-          let pick = k, bestLoss = Infinity;
-          for (let j = c0; j <= c1; j++) {
-            if (tempo().state()[j]) continue;
-            const d = Math.abs(elapsed - tempo().at(j));
-            const ioiJ = notes[j + 1] ? Math.max(60, (notes[j + 1].t - notes[j].t) * 1000) : 400;
-            if (d > Math.max(tempo().tol(j), ioiJ * 1.2)) continue;
-            const r = judgeNote({ spec: specE, sampleRate: srNow, fftSize: N, expectedMidi: notes[j].midi });
-            const self = r.self;
-            if (!self || !(self.mismatch < 250)) continue;
-            const loss = self.mismatch + d / 2;
-            if (loss < bestLoss) { bestLoss = loss; pick = j; }
-          }
-          if (pick !== k) {
-            best = pick;
-            noteIdx = pick;
-            devMs = elapsed - tempo().at(pick);
-            diag(`（快音对号：这一下最像第${pick + 1}个音 ${midiToNameOf(notes[pick].midi)}）`);
-          }
-        } catch (e) { /* 量不出来就按时间对号 */ }
       }
       if (!notes[best]) { stopMic(); return; }
       const exp = notes[best];
