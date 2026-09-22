@@ -11,7 +11,7 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0923-0130';
+const BUILD = '0923-0210';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
@@ -692,7 +692,10 @@ let userPickedStart = false;
 // 容许偏差：按时值比例给，再夹上下限 —— 这不是行业标准公式（没有那种东西），
 // 是按"等时序列的起音差异阈约 20~30ms"和"别拖到下一个音"两头定的起点值。
 // 第一个音给 2 倍（刚起手最容易不稳）。要调就调这三个数。
-const TIMING_FRAC = 0.25, TIMING_MIN_MS = 60, TIMING_MAX_MS = 250;
+// ⚠ 2026-09-22 晚实测：用户跟着弹时偏差在 ±200ms 之间游走（导出记录里 devMs -199~+69），
+// 而 25%×395ms=99ms 的窗太紧 —— 一漏就一路漏（那份导出 41 个音里 24 个判漏）。
+// 现在放宽到 45%×音距、下限 100ms、上限 350ms：跟得上比掐得准重要。
+const TIMING_FRAC = 0.45, TIMING_MIN_MS = 100, TIMING_MAX_MS = 350;
 function timingToleranceMs(i) {
   const cur = notes && notes[i], next = notes && notes[i + 1];
   // 时值优先用"到下一个音的间隔"；最后一个音没有下一个，就用它自己的时值
@@ -722,6 +725,49 @@ let tempoClosed = -1;      // 已经关窗结算到第几个音
 // 超过这个宽限还没起手，就退回"按理数拍子"的正规时间轴，免得整段卡住。
 const TEMPO_FIRST_GRACE_MS = 4000;
 let tempoOriginMs = null;
+let tempoClicks = [];      // 还没响的"音符提示音"时刻（相对 micStartedAt 的 ms）
+let lateAccept = false;    // 这一下是"超出时间窗、但按下一个音认下来"的（用来决定要不要重新对齐）
+// 起拍音（拾音）：第 1 小节如果不是完整小节（这首谱是 1/4），它里面的音就算"起拍音"。
+// 交互上不掐它的拍子 —— 给一整拍宽限，而且节拍提示音从第 2 小节的正拍开始。
+function tempoPickupCount() {
+  if (!notes || notes.length < 2) return 0;
+  const first = notes[0].measure;
+  let n = 0;
+  for (const nt of notes) { if (nt.measure === first) n++; else break; }
+  return n < notes.length ? n : 0;
+}
+const tempoBeatMs = () => (60 / (userBpm || 76)) * 1000;
+// 提示音：和光标同一个时钟（都由 tempoAt 驱动）—— 这样"听到的"和"看到的"必然是一回事，
+// 不会出现"节拍器和光标对不上"（那是两个时钟域：Web Audio 的 currentTime vs performance.now）。
+function tempoClickAt(delaySec, accent) {
+  const ctx = audio.getCtx();
+  if (!ctx) return;
+  try {
+    const osc = ctx.createOscillator(), g = ctx.createGain();
+    osc.type = 'square';
+    osc.frequency.value = accent ? 1568 : 1046;
+    const t = ctx.currentTime + Math.max(0, delaySec);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(accent ? 0.14 : 0.09, t + 0.02);   // 软起振：别被麦克风当成拨弦
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.07);
+    osc.connect(g); g.connect(ctx.destination);
+    osc.start(t); osc.stop(t + 0.09);
+  } catch (e) { /* 没有音频就不响，不影响判定 */ }
+}
+// 把"接下来 200ms 内该响的提示音"预约出去（跟节拍时用；每个音的起点响一下 = 光标走到哪响到哪）
+function scheduleTempoClicks(tMs) {
+  if (!($('metro') && $('metro').checked)) return;
+  while (tempoClicks.length && tempoClicks[0] < tMs - 80) tempoClicks.shift();   // 过期的丢掉
+  while (tempoClicks.length && tempoClicks[0] <= tMs + 200) {
+    const at = tempoClicks.shift();
+    tempoClickAt((at - tMs) / 1000, false);
+  }
+}
+function rebuildTempoClicks() {
+  if (!notes) return;
+  const startTo = tempoPickupCount();          // 起拍音不响提示音（它是"起手"，由用户自己定）
+  tempoClicks = notes.slice(startTo).map((_, k) => tempoAt(k + startTo));
+}
 
 // ── 实时诊断：每判一个音/漏一个音就往页面上写一行 ────────────────────────────
 // 为什么要有：出问题时"说不清是什么造成的"。把 期望音 / 时间窗 / 起音时刻与偏差 /
@@ -735,7 +781,11 @@ function diag(line) {
   if (el) el.textContent = diagLines.join('\n');
 }
 function resetDiag() { diagLines = []; const el = $('diag'); if (el) el.textContent = ''; }
-const tempoTol = (i) => timingToleranceMs(i);
+const tempoTol = (i) => {
+  const base = timingToleranceMs(i);
+  // 起拍音给一整拍的宽限（它是"起手"，不是"正拍"）
+  return i < tempoPickupCount() ? Math.max(base, tempoBeatMs()) : base;
+};
 // 谱面第 i 个音"该响"的时刻（tempo 专用：带上原点偏移）
 const tempoAt = (i) => expectedAtMs(i) + (tempoOriginMs || 0);
 // 这一刻的起音归到哪个音？不在任何窗口里 → -1（早了/晚了，不算这个音）
@@ -771,6 +821,7 @@ function tempoTick(nowMs) {
     if (t < TEMPO_FIRST_GRACE_MS) return false;
     tempoOriginMs = 0;
   }
+  scheduleTempoClicks(t);
   // ① 关窗：右边界过了还没判到 → 记错（用户口径：规定时间里没出现理想音就是错）
   while (tempoClosed + 1 < notes.length
     && t > tempoAt(tempoClosed + 1) + tempoTol(tempoClosed + 1)) {
@@ -1168,30 +1219,38 @@ function micTick() {
           tempoOriginMs = elapsed - expectedAtMs(0);
           tempoCursor = 0;
           noteIdx = 0;
+          lateAccept = false;
+          rebuildTempoClicks();
           highlightCurrent();
-          // 节拍器也跟着重新对齐：第 1 拍 = 用户这一下（否则节拍器和谱面时钟差一个起手量）
-          if ($('metro') && $('metro').checked) { stopMetronome(); startMetronome(); }
-          setVerdict(`起手对齐：以这一下为第 1 个音（${midiToNameOf(notes[0].midi)}）`, '');
+          const pickup = tempoPickupCount();
+          setVerdict(`起手对齐：以这一下为第 1 个音（${midiToNameOf(notes[0].midi)}）`
+            + (pickup ? `　※ 这 ${pickup} 个音是起拍音（拾音），正拍从第 2 小节开始` : ''), '');
+          if (pickup) diag(`※ 起拍音 ${pickup} 个（不掐拍子）；正拍 / 提示音从第 2 小节开始`);
         }
-        const k = tempoNoteAt(elapsed);
+        let k = tempoNoteAt(elapsed);
         if (k < 0) {
-          // 落在所有时间窗之外（弹早了/弹晚了）→ 这个音**不判**，
-          // 它对应的那个音会在窗口关掉时按"错"记（用户口径：规定时间里没出现理想音就是错）。
-          // 顺手把"你这下比第几个音早了/晚了多少ms"报给用户，方便他自己对拍子。
           const near = tempoNearestPending(elapsed);
-          if (near.idx >= 0 && Math.abs(near.dev) <= tempoTol(near.idx) * 3) {
+          // 落在时间窗之外：如果离"下一个还没判的音"不算太远（≤1.2 个音距），
+          // **先按那个音判音准**（lateAccept）。音对 → 认下并**把时间轴重新对齐到你这一下**，
+          // 免得"一漏就一路漏、越弹越乱"（用户实测的痛点）；音不对 → 才是真错。
+          const ioi = near.idx >= 0 ? Math.max(60, (notes[near.idx + 1] ? notes[near.idx + 1].t - notes[near.idx].t : 0.4) * 1000) : 400;
+          if (near.idx >= 0 && Math.abs(near.dev) <= ioi * 1.2) {
+            k = near.idx;
+            lateAccept = true;
+          } else if (near.idx >= 0 && Math.abs(near.dev) <= tempoTol(near.idx) * 4) {
+            // 差太多：只提示，不认（那个音会在窗口关掉时按错记）
             timingDevs.push(near.dev);
             timingTolMs = tempoTol(near.idx);
             if (near.dev < 0) earlyCount++; else lateCount++;
             const dir = near.dev < 0 ? '早' : '晚';
             diag(`起音 ${(elapsed / 1000).toFixed(2)}s 比第${near.idx + 1}个音${dir} `
               + `${Math.abs(Math.round(near.dev))}ms（容许 ±${Math.round(tempoTol(near.idx))}ms）→ 这一下不算`);
-            setVerdict(`这一下比第${near.idx + 1}个音${near.dev < 0 ? '早' : '晚'}了 `
-              + `${Math.abs(Math.round(near.dev))}ms（容许 ±${Math.round(tempoTol(near.idx))}ms）`
-              + ` —— 那个音按错算，继续`, 'bad');
+            micTimer = requestAnimationFrame(micTick);
+            return;
+          } else {
+            micTimer = requestAnimationFrame(micTick);
+            return;
           }
-          micTimer = requestAnimationFrame(micTick);
-          return;
         }
         best = k;
         noteIdx = k;             // 只是把"当前音"对齐到这一下；光标仍由时钟驱动
@@ -1549,6 +1608,14 @@ function micTick() {
       if (modeKind === 'tempo') {
         // 跟节拍：判完只标记这个音，光标/时间轴继续按时钟走（不推进 noteIdx）
         tempoState[best] = pass ? 'ok' : 'bad';
+        // 超窗但音对（lateAccept）→ 把时间轴**重新对齐到这一下**：
+        // 用户口径是"跟得上比掐得准重要"，一漏就一路漏、越弹越乱才是最大的问题。
+        if (lateAccept && pass && devMs != null && Math.abs(devMs) > tempoTol(best) * 0.5) {
+          tempoOriginMs += devMs;
+          rebuildTempoClicks();
+          diag(`↻ 重新对齐 ${devMs > 0 ? '+' : ''}${Math.round(devMs)}ms（后面按你的节奏走）`);
+        }
+        lateAccept = false;
       } else {
         advanceNote();
       }
@@ -1671,6 +1738,8 @@ async function startMic() {
   tempoCursor = 0;
   tempoClosed = -1;
   tempoOriginMs = null;
+  tempoClicks = [];
+  lateAccept = false;
   resetDiag();
   // 音符加载后重建"光标→谱面"对应表（按**当前选中的声部**）
   if (score) buildTickMap(score, Number($('track') && $('track').value) || 0);
@@ -1706,7 +1775,10 @@ async function startMic() {
   }
   // 节拍器：排在向导旋律之后启动 —— 它要抓当前的 sessionToken，
   // 上面那句 ++sessionToken 会让先启动的排程立刻作废。
-  if ($('metro') && $('metro').checked) startMetronome();
+  // 跟节拍模式用"音符提示音"（scheduleTempoClicks，和光标同一个时钟）；
+  // 四分音符节拍器只在"等我弹"模式下用 —— 两个一起响会打架，而且跟节拍时
+  // 用户要的是"光标走到哪响到哪"，不是抽象的拍子。
+  if ($('metro') && $('metro').checked && modeKind !== 'tempo') startMetronome();
   $('mic').textContent = '⏹ 停止';
   $('mic').classList.add('on');
   setVerdict(`准备 —— 四拍后开始（${userBpm} BPM），弹错不停。`);
