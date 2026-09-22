@@ -11,7 +11,7 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0923-1100';
+const BUILD = '0923-1130';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 

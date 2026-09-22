@@ -13,6 +13,11 @@
 export const ONSET = {
   shapeFluxMin: 0.02,
   sharp: 1.4,
+  // 连续同一个音再拨一下：新的一下叠在自己的余响上，电平只抬 1.1~1.3 倍（实测 1.10），
+  // 用 1.4 倍卡就会把第二下整片丢掉（"两个连续音有时候只有一个"就是这个）。
+  // 所以这种情况允许更低的上抬幅度（1.10），但**必须**有高频瞬态当证据 ——
+  // 拨片/指甲那一下在 2kHz 以上一定有新的爆发，而衰减中的余响只会往下走、造不出新爆发。
+  sharpRepeat: 1.10,
   riseNeedNormal: 1.5,
   riseNeedRepeat: 1.2,
   fluxNeedNormal: 0.18,
@@ -43,7 +48,8 @@ export function decideOnset(p) {
   const riseNeed = repeat ? ONSET.riseNeedRepeat : ONSET.riseNeedNormal;
   const fluxNeed = repeat ? ONSET.fluxNeedRepeat : ONSET.fluxNeedNormal;
   const sharpEnough = p.lv > p.prevLv * ONSET.sharp
-    || p.prevLv < Math.max(ONSET.gateFloor, p.floor * ONSET.prevFloorScale);
+    || p.prevLv < Math.max(ONSET.gateFloor, p.floor * ONSET.prevFloorScale)
+    || (repeat && p.hfFlux > ONSET.repeatHfFlux && p.lv > p.prevLv * ONSET.sharpRepeat);
   const shapeChanged = p.shapeFlux > ONSET.shapeFluxMin;
   const riseOk = p.lv > p.lagged * riseNeed;
   const fluxOk = p.flux > fluxNeed && p.lv > p.lagged * ONSET.laggedRatio;
