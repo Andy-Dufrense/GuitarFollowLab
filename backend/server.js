@@ -10,6 +10,7 @@ import https from 'node:https';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -54,9 +55,45 @@ function lanIPs() {
   return out;
 }
 
-function send(res, code, type, body) {
-  res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store' });
-  res.end(body);
+// 只有文本类才值得压；音色库/字体/图片压了反而多花 CPU（它们本来就不吃 gzip）
+// octet-stream 里装的是音色库（sf2/sf3）和 .gp3 谱面 —— 它们 gzip 也能省一半
+// （实测 sonivox.sf2 1320KB → 684KB），首屏那一次很值。
+const COMPRESSIBLE = /^(text\/|application\/(json|javascript|xml|octet-stream)|image\/svg)/;
+// 长缓存：vendor 里的第三方大件（alphaTab / 字体 / 音色库）不随我们迭代变 ——
+// 让浏览器一直留着（朋友/手机第二次打开就几乎瞬开）。
+// 其余的 JS / HTML / JSON 仍旧 no-store：你自己改代码，刷新立刻见效（不会被缓存骗）。
+const LONG_CACHE = 'public, max-age=31536000, immutable';
+function cachePolicy(urlPath, ext) {
+  if (urlPath.startsWith('/vendor/')) return LONG_CACHE;
+  if (['.sf2', '.sf3', '.woff2', '.woff', '.otf', '.ttf'].includes(ext)) return LONG_CACHE;
+  return 'no-store';
+}
+// 压过的内容按"文件 + mtime"缓存，别每个请求都重压一遍 1MB 的 alphaTab
+const gzipCache = new Map();
+function gzipFor(file, mtimeMs, buf) {
+  const hit = gzipCache.get(file);
+  if (hit && hit.mtimeMs === mtimeMs) return hit.buf;
+  const bufGz = zlib.gzipSync(buf);
+  gzipCache.set(file, { mtimeMs, buf: bufGz });
+  return bufGz;
+}
+function send(res, code, type, body, opts = {}) {
+  const headers = { 'Content-Type': type, 'Cache-Control': opts.cache || 'no-store' };
+  let out = body;
+  const buf = Buffer.isBuffer(body) ? body : Buffer.from(String(body));
+  const req = opts.req;
+  const wantsGzip = !!(req && /\bgzip\b/.test(String(req.headers['accept-encoding'] || '')));
+  if (wantsGzip && COMPRESSIBLE.test(type) && buf.length > 1024) {
+    const gz = opts.file ? gzipFor(opts.file, opts.mtimeMs, buf) : zlib.gzipSync(buf);
+    if (gz.length < buf.length) {
+      out = gz;
+      headers['Content-Encoding'] = 'gzip';
+      headers['Vary'] = 'Accept-Encoding';
+    }
+  }
+  if (Buffer.isBuffer(out)) headers['Content-Length'] = out.length;
+  res.writeHead(code, headers);
+  res.end(out);
 }
 
 const handler = (req, res) => {
@@ -97,7 +134,12 @@ const handler = (req, res) => {
 
   fs.readFile(file, (err, data) => {
     if (err) { send(res, 404, 'text/plain; charset=utf-8', '404 找不到 ' + urlPath); return; }
-    send(res, 200, MIME[path.extname(file).toLowerCase()] || 'application/octet-stream', data);
+    const ext = path.extname(file).toLowerCase();
+    let mtimeMs = 0;
+    try { mtimeMs = fs.statSync(file).mtimeMs; } catch (e) { /* ignore */ }
+    send(res, 200, MIME[ext] || 'application/octet-stream', data, {
+      req, cache: cachePolicy(urlPath, ext), file, mtimeMs,
+    });
   });
 };
 
