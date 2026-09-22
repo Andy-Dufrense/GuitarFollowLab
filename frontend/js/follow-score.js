@@ -11,7 +11,7 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0923-0700';
+const BUILD = '0923-0800';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
@@ -1351,7 +1351,16 @@ function micTick() {
       // ⚠ 别用"锚定测量说准"来兜底：试过，会把"弹高了半音"的检出打崩（39 个里只剩 7 个判错）——
       // 锚定测量本来就会在高半音的窗里找到东西。
       const passCand = candMatch ? candMatch.pass : false;
-      const pass = JUDGE_CAND && candMatch ? passCand : (reliable && Math.abs(centsFixed) <= 75);
+      // 轻音兜底（2026-09-22 晚，用用户新录的 F4/E4 交替量的）：
+      // 那段录音里"响的几下（电平 0.1~0.2）"量得很干净（残差 1~20 vs 23~70），
+      // 出问题的全是**轻的下（电平 0.02~0.04）**，残差变成 43v49、44v43 这种分不开的；
+      // 而手机上判错的那两行也正是轻的（0.021 / 0.031）。
+      // 所以：**电平低于 0.06 的音**，如果精确读数说它就在谱面这个音上（±45 音分内），
+      // 就不让"候选重排"把它判成错 —— 低信噪比下候选重排本来就没有分辨力。
+      // 响的音（≥0.06）不受影响：±1/±2 弹错的两向验收都在那个区间，检出不能松。
+      const quiet = lv < 0.06;
+      const quietOk = quiet && Math.abs(centsP) <= 45;
+      const pass = JUDGE_CAND && candMatch ? (passCand || quietOk) : (reliable && Math.abs(centsFixed) <= 75);
       // 判"错"之后要说出**用户弹的是哪个音**。问题：上面那把尺子是在"谱面那个音"的
       // 谐波位置上找峰的（±60 音分），真弹成隔壁半音时真谐波落在范围外，读数会被拉回来
       // —— 实测真弹 D#4 读成 -59 音分（指向 C#4，方向还反了）。
