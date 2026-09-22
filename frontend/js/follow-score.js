@@ -11,7 +11,7 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0922-2210';
+const BUILD = '0922-2330';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
@@ -632,7 +632,11 @@ const JUDGE_DIFF = globalThis.__judgeDiff == null ? false : !!globalThis.__judge
 // 验收（test/gt-notes.mjs，6 段真机录音、39 个拨弦，音高独立量出来再交叉校验）：
 //   弹对→判对 39/39；谱面要 ±1/±2 品 → 判错 39/39。这一步只用真机录音，不用合成信号。
 const JUDGE_CAND = globalThis.__judgeCand == null ? true : !!globalThis.__judgeCand;
-const CAND_FIT_MAX = 190;      // 本音"失配"上限（analysis.js mismatchOf 那套双向失配，单位音分）
+// 本音"失配"上限（analysis.js mismatchOf 那套双向失配，单位音分）。
+// 250 是照实测分布定的：弹对 118~195（1弦最松）、弹错 186~300、没证据 300。
+// 原来写 190 —— 正好卡在 1 弦那批安静音的失配上（190/193/195），于是同一段里
+// 一半判对一半判错（用户报的"1弦1品不是每次都错"就是这个）。
+const CAND_FIT_MAX = 250;
 // 会话记录：每个音的"期望 / 实测"，包含判定比值、周期性(clarity)、电平、时刻。
 // 这是**唯一能用来调参的数据**：录一遍干净的（只弹对的）就等于拿到标准答案，
 // 不用再靠"你猜我有没有弹对"。
@@ -1294,8 +1298,16 @@ function micTick() {
       //   用户实测"大部分都对、很多音推荐我调弦但我就是弹错了"，它就是主因之一。
       //   复核值仍然记进导出记录，只作参考。）
       const confirmed = false;
-      // 判过：本音是这几个候选里最像的那个、而且本音自己"接得上"（失配够小）。
-      // 没有候选证据（candSelf 为空）→ 判错，跟"对就是对、错就是错"两档一致。
+      // 判过：**本音失配够小 + 本音在"差一品"的候选里最像**，两条都要。
+      // 真正干活的是第二条（领先对手）：弹错半音时，那个邻居候选会明显压过本音。
+      // 第一条只是个"别把噪声当音"的上限 —— 实测分布（真机 39 个拨弦 + 手机导出 82 条）：
+      //   弹对（真机）        本音失配 121~182
+      //   弹对（手机·1弦）     本音失配  118~195   ← 1弦又细又轻，失配天生偏高
+      //   弹错（真机 ±1/±2）   本音失配  186~300
+      //   没证据（静音/噪声）   本音失配  300（= 找不到任何峰）
+      // 所以门槛放在 250：既容得下 1 弦的安静音（195），又不会把"没证据"放进来（300）。
+      // ⚠ 别用"锚定测量说准"来兜底：试过，会把"弹高了半音"的检出打崩（39 个里只剩 7 个判错）——
+      // 锚定测量本来就会在高半音的窗里找到东西。
       const passCand = !!(candSelf && candSelf.mismatch < CAND_FIT_MAX
         && (!candRival || candSelf.score > candRival.score));
       const pass = JUDGE_CAND && candMatch ? passCand : (reliable && Math.abs(centsFixed) <= 75);

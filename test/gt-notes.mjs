@@ -193,6 +193,16 @@ const METHODS = {
     const fitOk = Number(process.env.VC_FIT || 190);
     return { pass: margin > marginOk && self.mismatch < fitOk, hz: hzOf(self.midi), margin };
   },
+  // ④c：现在产品里用的那条 —— 本音失配 < 250（照实测分布定的上限）且本音在 ±1/±2 里最像。
+  '④c 候选重排（产品规则 fit<250）': (mags, N, exp) => {
+    const r = matchNoteByCandidates(mags, SR, N, exp);
+    const self = r.ranked.find((x) => x.offset === 0);
+    const rival = r.ranked.filter((x) => x.offset !== 0 && Math.abs(x.offset) <= 2)
+      .sort((a, b) => b.score - a.score)[0];
+    if (!self) return { pass: false, hz: 0 };
+    const pass = self.mismatch < 250 && (!rival || self.score > rival.score);
+    return { pass, hz: hzOf(exp), midi: exp };
+  },
 };
 
 const OFFSETS = [0, -1, 1, -2, 2];
