@@ -11,7 +11,7 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0923-1200';
+const BUILD = '0923-1230';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
@@ -215,6 +215,9 @@ function showAlignLine() {
 // 在谱面上标出这个音判成什么：绿 = 对、红 = 错、灰 = 测不准。
 // 用和光标同一套布局坐标，所以标记会一直贴在对应的音上（滚动也跟着走）。
 function markNote(idx, kind) {
+  // 无谱面测试（arp）：直接在音格子上标对/错
+  const cell = document.getElementById('cell' + idx);
+  if (cell && cell.classList) cell.classList.add(kind === 'ok' ? 'ok' : 'bad');
   if (!api || !api.renderer) return;
   const beat = noteBeats[idx];
   const box = $('marks');
@@ -235,7 +238,7 @@ function markNote(idx, kind) {
 
 // index 省略 = 当前该弹的那个音（noteIdx）；给"起音预览"用时会显式传下一个音
 function highlightCurrent(index = noteIdx) {
-  if (!api) return;
+  if (!api) { highlightCell(Math.max(0, Math.min(index, (notes || []).length - 1))); return; }
   const box = document.getElementById('cursor');
   const idx = Math.max(0, Math.min(index, (noteBeats || []).length - 1));
   const beat = noteBeats[idx];
@@ -411,6 +414,8 @@ $('song').onchange = async () => {
   songKind = $('song').value;
   stopChords();
   if (api && api.playerState === 1) api.playPause();
+  // 换曲目 = 换一份判定清单：清掉上一份（含光标对照表）
+  notes = null; notesMeta = null; noteIdx = 0; noteBeats = []; noteTicks = [];
   if (songKind === 'chords') {
     await loadChords();
     $('scoreWrap').style.display = 'none';
@@ -421,8 +426,20 @@ $('song').onchange = async () => {
     userBpm = Number($('speed').value) || 76;
     renderChords();
     setVerdict('和弦练习：点「试听」走一遍和弦（每和弦 4 拍），点「跟弹」开始判定。');
+  } else if (songKind === 'arp') {
+    // 无谱面测试：不画五线谱，用音格子（T3231323 / C–Am–F–G）
+    $('scoreWrap').style.display = 'none';
+    $('chords').style.display = 'none';
+    $('cells').style.display = 'block';
+    $('track').style.display = 'none';
+    $('loop').style.display = 'none';
+    await loadNotes();
+    renderCells();
+    $('title').textContent = `C–Am–F–G · T3231323（逐音测试）— v${BUILD}`;
+    setVerdict('逐音测试：点「跟弹」，按格子里写的弦/品一个一个弹（蓝色格子 = 当前该弹的）。');
   } else {
     $('chords').style.display = 'none';
+    $('cells').style.display = 'none';
     $('scoreWrap').style.display = 'block';
     $('track').style.display = '';
     $('loop').style.display = '';
@@ -701,12 +718,54 @@ function tempo() {
 
 async function loadNotes() {
   // 全部音符（原来只取前 60 个，所以光标走到一半多就"结束"了）
+  // arp = 无谱面的逐音测试：用预先算好的时间轴 frontend/data/chord_arp.json
   if (!notes) {
-    const data = await (await fetch('./data/hey_jude.json')).json();
+    const file = songKind === 'arp' ? './data/chord_arp.json' : './data/hey_jude.json';
+    const data = await (await fetch(file)).json();
     notes = data.notes;
     notesMeta = data;            // 小节/拍号/速度都在这儿（节拍器要用）
   }
   return notes;
+}
+
+// ── 无谱面测试（arp）：一排"音格子"，当前该弹的那个高亮 ──────────────────────
+function renderCells() {
+  const box = $('cells');
+  if (!box || !notes) return;
+  box.innerHTML = '';
+  const byMeasure = new Map();
+  notes.forEach((n, i) => {
+    const m = n.measure || 0;
+    if (!byMeasure.has(m)) byMeasure.set(m, []);
+    byMeasure.get(m).push({ n, i });
+  });
+  for (const [m, list] of byMeasure) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const tag = document.createElement('div');
+    tag.className = 'tag';
+    tag.textContent = list[0].n.chord || ('第' + (m + 1) + '小节');
+    row.appendChild(tag);
+    for (const { n, i } of list) {
+      const el = document.createElement('div');
+      el.className = 'cell';
+      el.id = 'cell' + i;
+      el.innerHTML = `<b>${midiToNameOf(n.midi + pitchShift())}</b>${n.string}弦${n.fret}品`;
+      row.appendChild(el);
+    }
+    box.appendChild(row);
+  }
+  highlightCurrent();
+}
+function highlightCell(idx) {
+  const box = $('cells');
+  if (!box) return;
+  const prev = box.querySelector && box.querySelector('.cell.now');
+  if (prev && prev.classList) prev.classList.remove('now');
+  const el = document.getElementById('cell' + idx);
+  if (!el || !el.classList) return;
+  el.classList.add('now');
+  if (el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
 }
 
 function countIn(beats = 4) {
@@ -1665,7 +1724,7 @@ async function startMic() {
   alignOffsetSec = null;
   micStartedAt = performance.now();
   $('good').textContent = '0'; $('bad').textContent = '0';
-  if (songKind === 'heyjude') await loadNotes();
+  if (songKind === 'heyjude' || songKind === 'arp') await loadNotes();
   // 跟节拍：每次开始都清空状态（每个音先记成"待判"）
   tempo().reset();
   resetDiag();

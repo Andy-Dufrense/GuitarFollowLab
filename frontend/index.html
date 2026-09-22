@@ -65,6 +65,18 @@ main { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; padding
 #chords .c .nm { font-size:22px; font-weight:700; width:56px; }
 #chords .c .vo { color:var(--dim); font-size:13px; }
 #chords .c .beat { margin-left:auto; letter-spacing:3px; color:var(--dim); font-size:18px; }
+/* 无谱面测试（arp）：一排音格子，当前那个高亮 —— 不画五线谱，只看"该弹哪个音" */
+#cells { display:none; flex:1 1 auto; min-height:0; overflow:auto; background:var(--card);
+  border:1px solid var(--line); border-radius:14px; padding:10px; }
+#cells .row { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px; }
+#cells .row .tag { width:40px; color:var(--dim); font-size:13px; line-height:44px; }
+#cells .cell { min-width:74px; padding:6px 8px; border:1px solid var(--line); border-radius:10px;
+  text-align:center; font-size:13px; line-height:1.25; }
+#cells .cell b { display:block; font-size:17px; }
+#cells .cell.small b { font-size:15px; color:#555; }
+#cells .cell.now { border-color:var(--now); background:#eef4ff; box-shadow:0 0 0 2px rgba(47,107,216,.25); }
+#cells .cell.ok { border-color:var(--ok); }
+#cells .cell.bad { border-color:var(--bad); background:#fdf3f3; }
 .count { position:fixed; inset:0; display:none; align-items:center; justify-content:center;
   background:rgba(247,245,241,.75); font-size:22vw; font-weight:800; color:var(--now); z-index:50; pointer-events:none; }
 .count.on { display:flex; }
@@ -83,6 +95,9 @@ main { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; padding
   <select id="song" aria-label="曲目">
     <option value="heyjude">Hey Jude（真实谱面）</option>
     <option value="chords">和弦练习（C–Am–F–G）</option>
+    <!-- 无谱面测试：只用"音格子"显示当前该弹哪个音（第几弦第几品）。
+         用来测"和弦谱（非扫弦）也当单音判"：逐音能不能过 / 弹错会不会提示 / T4231323 会不会报错。 -->
+    <option value="arp">C–Am–F–G · T3231323（逐音测试）</option>
   </select>
   <select id="track" aria-label="声部"></select>
   <select id="mode" aria-label="模式">
@@ -115,6 +130,7 @@ main { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; padding
 <main>
   <div id="scoreWrap"><div id="score"><div id="marks"></div><div id="cursor"></div></div></div>
   <div id="chords"></div>
+  <div id="cells"></div>
   <div class="hud">
     <span class="nx" id="next"></span>
     <span id="beat" style="color:#8b857c;font-size:15px">·</span>
