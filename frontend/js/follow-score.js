@@ -11,7 +11,7 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0923-0930';
+const BUILD = '0923-1000';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
@@ -1446,6 +1446,9 @@ function micTickBody() {
         dHz: estDiff && estDiff.score > 0 ? Math.round(estDiff.f0) : null,
         // 候选重排这一路的证据：挑出来的音、本音失配、本音相对最强对手的领先倍数
         cand: candBest ? midiToNameOf(candBest.midi) : null,
+        // 低八度守卫的证据：期望音判过时，若"低一个八度"明显更像，会被判错并记在这里
+        candTopFit: candBest && candBest.mismatch != null ? Number(candBest.mismatch.toFixed(0)) : null,
+        octaveBelow: candMatch && candMatch.octaveBelow ? midiToNameOf(candMatch.octaveBelow.midi) : null,
         candOffset: candBest ? candBest.offset : null,
         candFit: candSelf ? Number(candSelf.mismatch.toFixed(0)) : null,
         candRival: candRival ? midiToNameOf(candRival.midi) : null,

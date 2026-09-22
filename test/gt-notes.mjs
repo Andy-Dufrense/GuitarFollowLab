@@ -21,6 +21,7 @@ const M = 'file:///E:/GuitarFollowLab/backend/engine/';
 const { spectrumOf } = await import(M + 'dsp.js');
 const { estimateF0Near, estimateF0ByPeaks, matchNoteByCandidates, verifyExpectedNote } =
   await import(M + 'analysis.js');
+const { judgeNote } = await import(M + 'judger.js');
 
 const SR = 48000;
 const DIR = 'sound_data/f32';
@@ -200,8 +201,9 @@ const METHODS = {
     const rival = r.ranked.filter((x) => x.offset !== 0 && Math.abs(x.offset) <= 2)
       .sort((a, b) => b.score - a.score)[0];
     if (!self) return { pass: false, hz: 0 };
-    const pass = self.mismatch < 250 && (!rival || self.score > rival.score);
-    return { pass, hz: hzOf(exp), midi: exp };
+    // 直接问判定层（含低八度守卫），免得测试里再抄一份规则
+    const j = judgeNote({ spec: mags, sampleRate: SR, fftSize: N, expectedMidi: exp });
+    return { pass: j.pass, hz: hzOf(exp), midi: exp };
   },
 };
 

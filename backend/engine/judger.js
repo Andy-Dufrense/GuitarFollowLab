@@ -22,6 +22,12 @@ export const JUDGE = {
   fitMax: 250,
   // 认音名时只在"差一品"的候选里比：±1、±2
   rivalOffsets: [1, 2],
+  // 低八度守卫：用户"全弹 5弦3品(C3)"那一遍里，很多期望 C4 的音被**判成对**——
+  // 因为 C4 的基频正好是 C3 的 2 次谐波，C3 的能量把 C4 的谐波位置全填满了。
+  // 所以"弹对"还要多问一句：**低八度那个音是不是明显更像**（失配好 ≥80 音分才算明显）。
+  // 80 这个数是量出来的：真机录音里弹对的 40 个拨弦，低八度"赢"的 7 个差距只有
+  // 0/3/7/10/11/20/51 音分（打平或擦边），没有一个够 80 → 不会误伤弹对的。
+  octaveGuardCents: 80,
 };
 
 // match: matchNoteByCandidates(...) 的返回值
@@ -46,5 +52,15 @@ export function decideByCandidates(match, opts = {}) {
 // 一次判定要用到的所有测量都在这里，页面只负责把窗给它
 export function judgeNote({ spec, sampleRate, fftSize, expectedMidi, opts }) {
   const match = matchNoteByCandidates(spec, sampleRate, fftSize, expectedMidi);
-  return { match, ...decideByCandidates(match, opts) };
+  const out = { match, ...decideByCandidates(match, opts) };
+  // 低八度守卫：期望音判过之后，再看一眼"低一个八度"是不是明显更像
+  if (out.pass) {
+    const low = matchNoteByCandidates(spec, sampleRate, fftSize, expectedMidi - 12);
+    const lowSelf = low.ranked.find((x) => x.offset === 0) || null;
+    if (lowSelf && out.self && lowSelf.mismatch + JUDGE.octaveGuardCents < out.self.mismatch) {
+      out.pass = false;
+      out.octaveBelow = { midi: expectedMidi - 12, mismatch: Number(lowSelf.mismatch.toFixed(0)) };
+    }
+  }
+  return out;
 }
