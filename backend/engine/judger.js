@@ -28,6 +28,9 @@ export const JUDGE = {
   // 80 这个数是量出来的：真机录音里弹对的 40 个拨弦，低八度"赢"的 7 个差距只有
   // 0/3/7/10/11/20/51 音分（打平或擦边），没有一个够 80 → 不会误伤弹对的。
   octaveGuardCents: 80,
+  // 邻居要"明显"更好才算翻案：差 3% 以内属于擦边（噪声级别），
+  // 那条 F3 被判错的记录就是"邻居只好了 1.2%"（margin 0.988）被翻掉的。
+  rivalMargin: 0.97,
 };
 
 // match: matchNoteByCandidates(...) 的返回值
@@ -39,7 +42,7 @@ export function decideByCandidates(match, opts = {}) {
     .filter((x) => x.offset !== 0 && JUDGE.rivalOffsets.includes(Math.abs(x.offset)))
     .sort((a, b) => b.score - a.score)[0] || null;
   const best = ranked[0] || null;
-  const pass = !!(self && self.mismatch < fitMax && (!rival || self.score > rival.score));
+  const pass = !!(self && self.mismatch < fitMax && (!rival || self.score > rival.score * JUDGE.rivalMargin));
   return {
     pass, self, rival, best,
     // 给导出记录/诊断行用的证据
