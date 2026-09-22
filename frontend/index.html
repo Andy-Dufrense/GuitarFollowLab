@@ -55,9 +55,6 @@ main { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; padding
   font-size:14px; margin-bottom:6px; }
 #verdict.ok { border-color:var(--ok); color:var(--ok); }
 #verdict.bad { border-color:var(--bad); color:var(--bad); }
-/* 实时诊断：每个音一行（期望/时间窗/听到什么/判什么）——出问题直接看这里，不用导文件 */
-#diag { white-space:pre-wrap; font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
-  color:#7c766d; padding:0 2px 6px; }
 #wrongs { font-size:12.5px; color:var(--bad); white-space:nowrap; overflow-x:auto; min-height:0; padding-bottom:4px; }
 #err { white-space:pre-wrap; font-size:12.5px; color:var(--dim); padding-bottom:6px; }
 #chords { display:none; flex:1 1 auto; min-height:0; overflow:auto; background:var(--card);
@@ -126,7 +123,6 @@ main { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; padding
     <span>听到 <b id="heard">—</b></span>
   </div>
   <div id="verdict">点「试听」听一遍，再点「跟弹」对着麦克风弹。</div>
-  <div id="diag"></div>
   <div id="wrongs"></div>
   <div id="err"></div>
   <div id="count" class="count"></div>

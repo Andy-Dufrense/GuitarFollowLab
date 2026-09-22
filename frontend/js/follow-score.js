@@ -11,7 +11,7 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0923-0600';
+const BUILD = '0923-0700';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
@@ -630,8 +630,12 @@ function flashBeat(accent) {
   }
 }
 
-// 诊断面板的实体在 ./app/diag.js（见文件顶部 import）；这里只把 #diag 元素接给它
-initDiag(() => $('diag'));
+// 诊断面板的实体在 ./app/diag.js（见文件顶部 import）。
+// ⚠ 用户口径：这些"第几个音/听到什么/差多少音分/对错"的行**太占页面**，谱子都看不全了 ——
+// 所以页面上不再显示它们（index.html 里的 #diag 也一起删了）。
+// 判定证据仍然完整写进「导出记录」（cand / candFit / candMargin / devMs 那些字段），
+// 需要时用 `window.__vcDiag = 1` 打开（前提是页面上有 #diag 元素）。
+initDiag(() => (globalThis.__vcDiag ? $('diag') : null));
 // ── 跟节拍层实例（宿主接口）：实体在 ./app/tempo.js，这里只把页面的状态/回调接进去 ──
 let tempoLayer = null;
 function tempo() {
@@ -1108,7 +1112,7 @@ function micTick() {
         }
       }
       if (!notes[best]) { stopMic(); return; }
-      const exp = notes[best];
+      let exp = notes[best];
       // 判定：知道答案的打法 —— 量出实际音高，再归到最近的半音上比。
       // 不用 YIN 的绝对读数：真机录音上它会锁到次谐波（实测 82~100Hz，差一个半八度，
       // 而 clarity 还有 0.9），这也是项目当初放弃用 YIN 判定的原因。
@@ -1138,12 +1142,39 @@ function micTick() {
       // ── 判定：候选重排（本音 vs ±1 品 vs ±2 品）────────────────────────────
       // spec 就是"判定这一刻往回 170ms"那扇窗，也就是 test/gt-notes.mjs 里验过的那扇。
       // 判定层在 engine/judger.js（候选重排 + 判过规则 + 阈值）
-      const candMatch = JUDGE_CAND
+      let candMatch = JUDGE_CAND
         ? judgeNote({ spec, sampleRate: specRate, fftSize: specN, expectedMidi: exp.midi })
         : null;
-      const candSelf = candMatch ? candMatch.self : null;
-      const candRival = candMatch ? candMatch.rival : null;
-      const candBest = candMatch ? candMatch.best : null;
+      let candSelf = candMatch ? candMatch.self : null;
+      let candRival = candMatch ? candMatch.rival : null;
+      let candBest = candMatch ? candMatch.best : null;
+      // ── "等我弹"也要做一次音高复核：这一下更像**下一个还没判的音** → 当前音记漏，
+      // 把这一下改判给下一个。解决两件事（用户 15:12 那份导出的 3 处错就在这儿）：
+      //   ① 快速交替处（E4/F4 那种邻音）对号错一位；
+      //   ② 漏弹一格之后"全体错位一位"的老毛病。
+      // 只在这三个条件同时成立时才跳：量到的音 == 下一个音、当前音明显不像（失配 >200）、
+      // 且下一个音自己明显更贴（失配好 60 以上）。这样不会把正常演奏判成"跳音"。
+      if (modeKind !== 'tempo' && candMatch && candBest && candSelf && notes[best + 1]
+        && candBest.midi === notes[best + 1].midi && candSelf.mismatch > 200) {
+        const r2 = judgeNote({ spec, sampleRate: specRate, fftSize: specN, expectedMidi: notes[best + 1].midi });
+        if (r2.self && r2.self.mismatch + 60 < candSelf.mismatch) {
+          // 当前这个音：你没弹它 → 记"漏"（不是判你弹错）
+          missed++;
+          wrongList.push(`第${(exp.measure || 0) + 1}小节 漏了${midiToNameOf(exp.midi)}（跳过去了）`);
+          $('wrongs').textContent = '弹错/漏：' + wrongList.join('、');
+          $('missed').textContent = missed;
+          markNote(best, 'bad');
+          sessionLog.push({
+            no: best + 1, t: Number((now / 1000).toFixed(3)),
+            exp: exp.midi, expName: midiToNameOf(exp.midi), result: 'miss',
+          });
+          best += 1;
+          exp = notes[best];
+          candMatch = r2;
+          candSelf = r2.self; candRival = r2.rival; candBest = r2.best;
+          noteIdx = best;
+        }
+      }
       let diffSpec = spec;
       // ── 判定：**先独立量出"这一次起音弹的是什么音"，再和谱面对**（用户的口径）──
       // 不用"在期望音附近找峰"那把尺子（那个必然自证：弹偏两个半音也会捡个峰报回期望音，
