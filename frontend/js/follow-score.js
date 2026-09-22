@@ -25,6 +25,11 @@ import {
 } from './analysis.js';
 import { CFG, FLUX_N } from './config.js';
 import { createMetro } from './metro-core.js';
+// 分层：检测能力（起音层 / 判定层）各自一个文件，阈值也都收在那两个文件里。
+import { decideOnset } from './engine/onset.js';
+import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js';
+// 光标层：谱面格子 ↔ 判定清单 的对号（纯函数，单独一个文件）
+import { collectScoreSlots, mapSequenceToSlots } from './app/cursor.js';
 
 let api = null;            // alphaTab 实例（只建一次）
 let score = null;
@@ -154,121 +159,8 @@ let noteBeats = [];       // 每个音符对应的 alphaTab Beat 对象（用来
 // 所以现在先算对齐质量，**对不上就不重排**（保持时间轴原样），并把结论写到自检栏。
 let alignInfo = null;
 
-// ── 谱面 → 判定格子 ────────────────────────────────────────────────────────
-// 把谱面里"**要用户弹的音**"按顺序列出来（含时间）。单独抽出来是为了**能测**：
-// 以前这段藏在渲染回调里，只有真机 + alphaTab 才能跑，所以"延音要不要弹第二下"
-// 这种问题只能靠用户在手机上试 —— 现在可以拿一个假的谱面对象直接测。
-//
-// 两条规则：
-//   ① 用**当前选中的那一轨**（以前写死 tracks[0]，切到钢琴轨就串了）；
-//   ② 延音（tie）：谱面里延音是**独立的一拍**（"上一个音还在响"，不是"再弹一次"），
-//      必须跳过 —— 时间轴（gp_timeline.py）那边也是这么合的，两边必须一致，
-//      否则重排之后又给延音撑出一个格子，判定就要求用户弹两下。
-function collectScoreSlots(s, trackIndex = 0, opts = {}) {
-  const tr = s.tracks[trackIndex] || s.tracks[0];
-  const stave = tr && tr.staves && tr.staves[0];
-  if (!stave) return [];
-  const tempo = s.tempo || 76;
-  // ⚠ 只认 `isTieDestination`，**别的都不要碰**。三种写法都在手机上出过事：
-  //   ① `isTiedNote`：语义是"这个音带延音"，**起点和接续都是 true** → 两个都丢；
-  //   ② `tieDestination`：这个字段挂在**起点**身上（见下面 vendored 构建里的原文），
-  //      拿它当"接续判据"等于把起点也丢掉；
-  //   ③ 两个一起"或"（上一版就是）→ 起点 + 接续**都**被丢 → 谱面少两格。
-  //
-  // 依据是浏览器里真正跑的那份 alphaTab（frontend/vendor/alphaTab.min.js 原文）：
-  //     tieOrigin=null; tieDestination=null; isTieDestination=false;
-  //     get isTieOrigin(){ return null !== this.tieDestination }
-  // 即：`tieDestination` 指向"接续到哪个音"，所以它挂在起点上；只有
-  // `isTieDestination` 是"我接在上一个音后面"，也就是谱面里那一拍**不用弹**。
-  //
-  // 数出来对不上就是这么来的（用 PyGuitarPro 直接数过，见 test/probe-gp3-beats.py）：
-  //   Hey Jude 轨 0「Voice」：**119 个有音符的拍**，其中 **1 个是延音接续**
-  //   → 该有 **118** 个要弹的音（时间轴、试听、三处数都是 118）。
-  //   上一版把起点和接续都丢了 → 谱面只剩 **117** 格，而判定清单是 118 个音
-  //   → 从那一格起**全体错开一位** → "弹对的判错、弹错的判对"。
-  const isTieDest = (n) => !!(n && n.isTieDestination);
-  const out = [];
-  for (const bar of stave.bars) {
-    for (const voice of bar.voices) {
-      for (const beat of voice.beats) {
-        const tieDest = beat.notes.length ? beat.notes.every(isTieDest) : false;
-        if (tieDest && !opts.includeTieDests) continue;                     // 整拍都是延音接续
-        // ⚠ 拍点时刻的取值顺序：用户手机上实测 `absoluteStart` / `start` **都是 undefined**
-        // （导出里 align.sample 全是 "NaN"），导致"谱面×时间轴对号"永远失败、光标定位不到。
-        // alphaTab 不同版本/不同渲染阶段暴露的是这几组名字，全都试一遍。
-        const start = beat.absoluteStart ?? beat.start
-          ?? beat.absoluteDisplayStart ?? beat.displayStart
-          ?? beat.absolutePlayStart ?? beat.playStart ?? NaN;
-        for (const note of beat.notes) {
-          if (isTieDest(note) && !opts.includeTieDests) continue;          // 被延音的接续音符不算一格
-          out.push({
-            beat, start, t: (start / 960) * (60 / tempo),
-            // midi 用 realValue（alphaTab 里就是"算上调弦的真正音高"），
-            // 用它 + 品来跟时间轴逐条对号 —— 这两个字段跟"弦号怎么编号"无关。
-            midi: note.realValue, string: note.string, fret: note.value,
-          });
-        }
-      }
-    }
-  }
-  return out;
-}
-// ── 判定清单 → 光标位置：**一一对应**（第 i 个音 ↔ 第 i 个谱面位置）────────────
-//
-// 光标指哪儿，系统就在等哪个音 —— 两边必须是**同一份清单**，不然就是
-// "照着光标弹都判错、瞎弹反而对"。所以这里不再用"按时间就近挑一个"的那种配法
-// （试过：时刻不可靠时会退化，而且映射本身不单调 → 光标来回乱跳）。
-//
-// 默认就该是一一对应：谱面 118 个要弹的音（PyGuitarPro 数出来的，
-// test/probe-gp3-beats.py）和时间轴 118 个音本来就是同一批东西、同一个顺序
-// （test/probe-timelines.mjs 逐条比过音高+品，0 处不同）。
-// 而且这里**每次加载都再验一遍**：逐条对音高+品，对得上才写「对齐 ✓」。
-//
-// 对不上（谱面解析跟时间轴真的不是一份）时退到"按品+音高单调往后配"，
-// 并且把结论标成 ⚠ 写在页面上 —— 宁可让人看见"这两份东西不一样"，
-// 也不许再出现"悄悄错开一位、还装作没事"。
-function mapSequenceToSlots(list, beats) {
-  const m = beats.length;
-  const all = () => beats.map((b) => b.beat);
-  if (!list || !list.length) {
-    return { beats: all(), info: { source: 'score-only', beatsFromScore: m, notesFromTimeline: 0 } };
-  }
-  // ① 数量一样 → 逐条验（音高 + 品，跟弦号怎么编号无关）
-  if (list.length === m) {
-    let bad = 0, firstBad = -1;
-    for (let i = 0; i < m; i++) {
-      const n = list[i], b = beats[i];
-      if (n.midi !== b.midi || n.fret !== b.fret) { bad++; if (firstBad < 0) firstBad = i; }
-    }
-    return {
-      beats: all(),
-      info: {
-        source: bad ? 'index(有对不上的)' : 'index',
-        beatsFromScore: m, notesFromTimeline: list.length,
-        mismatched: bad, firstMismatch: firstBad,
-      },
-    };
-  }
-  // ② 数量不一样 → 按品+音高**只往后**找（单调 → 光标绝不会往回跳）
-  let j = 0, miss = 0;
-  const out = [];
-  for (const n of list) {
-    let k = -1;
-    for (let i = j; i < m; i++) {
-      if (beats[i].midi === n.midi && beats[i].fret === n.fret) { k = i; break; }
-      if (Number.isFinite(beats[i].t) && Number.isFinite(n.t) && beats[i].t > n.t + 0.6) break;
-    }
-    if (k < 0) { miss++; k = Math.min(j, m - 1); } else { j = k + 1; }
-    out.push(beats[k].beat);
-  }
-  return {
-    beats: out,
-    info: {
-      source: 'string+fret(单调)', beatsFromScore: m,
-      notesFromTimeline: list.length, matchedFail: miss,
-    },
-  };
-}
+// 光标层的两个映射函数已挪到 ./app/cursor.js（collectScoreSlots / mapSequenceToSlots），
+// 这里通过 import 使用 —— 见文件顶部。
 
 function buildTickMap(s, trackIndex = 0) {
   noteTicks = [];
@@ -1018,11 +910,9 @@ function micTick() {
   // 我把线下放到 0.10 就正好把它切了。
   // 重新按他的数据定：环境 0.008~0.022、真弹 0.076~0.213
   //   → 线下 **0.05**（环境的 2~6 倍，最轻那次真弹的 2/3）、上限 0.10。
-  const absNeed = Math.min(0.10, Math.max(0.05, ambient * 6));
   // 相对"最近最强"的门槛：试过 12%~22%，**把快音也挡掉了**
   // （快音第二下的起音电平只有首个峰值的一成左右），所以不启用，只留着这个参照给读数看。
   peakLvRef = Math.max(lv, peakLvRef * 0.998);
-  const strongGate = Math.max(0.0012, gate * 1.2, absNeed);
   // 不做节奏、也不设"延音期"：每一次拨弦都对应"下一个还没判过的音"。
   // （原来按时值设延音期，你弹得比时值快时，下一个音落在窗口里被忽略，
   //   光标不动 → 后面每个音都少一位、越走越乱。）
@@ -1034,8 +924,6 @@ function micTick() {
   const curN = notes && notes[noteIdx];
   const prevN = notes && notes[noteIdx - 1];
   const repeatSame = !!(curN && prevN && curN.midi === prevN.midi);
-  const riseNeed = repeatSame ? 1.2 : 1.5;
-  const fluxNeed = repeatSame ? 0.12 : 0.18;
   // ── "够不够陡"是这一层最要紧的判据 ─────────────────────────────────────
   // 用户实测：**只弹一个音让它一直响**，隔一会儿光标自己往前跳好几个音，还一直判对。
   // 原因：音量起伏（琴弦打拍子、手机麦克风的自动增益、房间反射）会被当成"新拨了一下"。
@@ -1043,9 +931,6 @@ function micTick() {
   // 所以要求"这一帧（16ms）的电平至少是上一帧的 1.7 倍"——慢慢涨的过不了这一关。
   // （测过 flux/hfFlux 都分不开这两种情况：同一个音整体变响时，全谱是一起变亮的。）
   const prevLv = levelHist.length ? levelHist[levelHist.length - 1] : 0;
-  // 1.4 倍：拨弦那一帧通常涨 1.5~50 倍；连着两个快音时第二个音只在第一个音的
-  // 余响上再抬一截（实测 1.67 倍），门限设 1.7 会把这种**真拨弦**挡掉。
-  const sharpEnough = lv > prevLv * 1.4 || prevLv < Math.max(0.0012, floor * 1.5);
   // ③ 换音：最近两帧的主峰都落在"和 3 帧前不同的音"上（差半个半音以上）
   let pitchJump = false;
   if (domHist.length >= 5) {
@@ -1063,14 +948,13 @@ function micTick() {
   // 拨弦会带进新的泛音，形状一定变。实测 4Hz 深打拍子能骗过"够不够陡"，
   // 但骗不过这一条（形状距离 ≈ 0）。
   const shapeFlux = shapeFluxOf(buf);
-  const shapeChanged = shapeFlux > 0.02;
-  const onset = phase === 'waiting' && now >= refractoryUntilMs && lv > strongGate
-    && sharpEnough && shapeChanged
-    && (lv > lagged * riseNeed || (flux > fluxNeed && lv > lagged * 1.15)
-        // 重复音：**必须是"真再拨一下"**——高频瞬态和电平抬升要同时出现（用 && 不用 ||）。
-        // 只有延音在响时，高频是衰减的、电平也在往下走，两条都不成立，就不会被当成新的一下。
-        || (repeatSame && hfFlux > 0.10 && lv > lagged * 1.15))
-    && now - lastOnsetMs > Math.max(90, CFG.minGapMs);
+  // ── 起音层的判据在 engine/onset.js（阈值也都在那儿）────────────────────
+  // 这里只负责把这一帧的量喂进去，然后用它给的结论。
+  const gateOut = decideOnset({
+    phase, now, refractoryUntilMs, lastOnsetMs, minGapCfg: CFG.minGapMs,
+    lv, prevLv, lagged, gate, floor, flux, hfFlux, shapeFlux, repeatSame,
+  });
+  const { onset, sharpEnough, shapeChanged, strongGate } = gateOut;
   // 起音层逐帧台帐（只在 test-follow-real.mjs 的 VC_ONSET_DEBUG=1 时打）：
   // 查"这一段为什么没被当起音 / 为什么一下被算成两下"用。对页面没有任何影响。
   if (globalThis.__vcOnsetDebug && lv > 0.02) {
@@ -1323,8 +1207,8 @@ function micTick() {
             const d = Math.abs(elapsed - tempoAt(j));
             const ioiJ = notes[j + 1] ? Math.max(60, (notes[j + 1].t - notes[j].t) * 1000) : 400;
             if (d > Math.max(tempoTol(j), ioiJ * 1.2)) continue;
-            const r = matchNoteByCandidates(specE, srNow, N, notes[j].midi);
-            const self = r.ranked.find((x) => x.offset === 0);
+            const r = judgeNote({ spec: specE, sampleRate: srNow, fftSize: N, expectedMidi: notes[j].midi });
+            const self = r.self;
             if (!self || !(self.mismatch < 250)) continue;
             const loss = self.mismatch + d / 2;
             if (loss < bestLoss) { bestLoss = loss; pick = j; }
@@ -1367,13 +1251,13 @@ function micTick() {
       const specN = judgeSpec || onsetPeakSpec ? PEAK_N : a.fftN;
       // ── 判定：候选重排（本音 vs ±1 品 vs ±2 品）────────────────────────────
       // spec 就是"判定这一刻往回 170ms"那扇窗，也就是 test/gt-notes.mjs 里验过的那扇。
-      const candMatch = JUDGE_CAND ? matchNoteByCandidates(spec, specRate, specN, exp.midi) : null;
-      const candSelf = candMatch ? (candMatch.ranked.find((x) => x.offset === 0) || null) : null;
-      const candRival = candMatch
-        ? (candMatch.ranked.filter((x) => x.offset !== 0 && Math.abs(x.offset) <= 2)
-          .sort((a, b) => b.score - a.score)[0] || null)
+      // 判定层在 engine/judger.js（候选重排 + 判过规则 + 阈值）
+      const candMatch = JUDGE_CAND
+        ? judgeNote({ spec, sampleRate: specRate, fftSize: specN, expectedMidi: exp.midi })
         : null;
-      const candBest = candMatch ? (candMatch.ranked[0] || null) : null;
+      const candSelf = candMatch ? candMatch.self : null;
+      const candRival = candMatch ? candMatch.rival : null;
+      const candBest = candMatch ? candMatch.best : null;
       let diffSpec = spec;
       // ── 判定：**先独立量出"这一次起音弹的是什么音"，再和谱面对**（用户的口径）──
       // 不用"在期望音附近找峰"那把尺子（那个必然自证：弹偏两个半音也会捡个峰报回期望音，
@@ -1549,8 +1433,7 @@ function micTick() {
       // 所以门槛放在 250：既容得下 1 弦的安静音（195），又不会把"没证据"放进来（300）。
       // ⚠ 别用"锚定测量说准"来兜底：试过，会把"弹高了半音"的检出打崩（39 个里只剩 7 个判错）——
       // 锚定测量本来就会在高半音的窗里找到东西。
-      const passCand = !!(candSelf && candSelf.mismatch < CAND_FIT_MAX
-        && (!candRival || candSelf.score > candRival.score));
+      const passCand = candMatch ? candMatch.pass : false;
       const pass = JUDGE_CAND && candMatch ? passCand : (reliable && Math.abs(centsFixed) <= 75);
       // 判"错"之后要说出**用户弹的是哪个音**。问题：上面那把尺子是在"谱面那个音"的
       // 谐波位置上找峰的（±60 音分），真弹成隔壁半音时真谐波落在范围外，读数会被拉回来
