@@ -90,6 +90,8 @@ main { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; padding
     <option value="tempo">跟节拍</option>
   </select>
   <label>速度 <input id="speed" type="number" min="40" max="200" step="2" value="76"> BPM</label>
+  <!-- 变调夹：夹几品，谱面所有音的实际音高就升高几个半音（谱面记号不变） -->
+  <label>变调夹 <input id="capo" type="number" min="0" max="12" step="1" value="0"> 品</label>
   <button id="loop">循环</button>
     <!-- 默认**不勾**：外放时手机会把播放的旋律当成本人在弹 —— 判定会把每个音都判"对"。
          这不是猜，是代码里一直写着的风险（"外放会被麦克风收进去"）；想用就戴耳机再勾。 -->
