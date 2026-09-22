@@ -17,7 +17,7 @@
 
 import fs from 'node:fs';
 
-const M = 'file:///E:/GuitarFollowLab/frontend/js/';
+const M = 'file:///E:/GuitarFollowLab/backend/engine/';
 const { spectrumOf, spectralMagAt } = await import(M + 'dsp.js');
 const { estimateF0Near, estimateF0ByPeaks, matchNoteByCandidates, verifyExpectedNote, diffMags } =
   await import(M + 'analysis.js');

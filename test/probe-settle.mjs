@@ -12,7 +12,7 @@
 
 import fs from 'node:fs';
 
-const M = new URL('../frontend/js/', import.meta.url);
+const M = new URL('../backend/engine/', import.meta.url);
 const { estimateF0Near } = await import(new URL('analysis.js', M));
 const { spectrumOf } = await import(new URL('dsp.js', M));
 

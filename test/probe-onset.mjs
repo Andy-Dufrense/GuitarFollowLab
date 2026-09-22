@@ -7,9 +7,9 @@
 // 用法： node test/probe-onset.mjs sound_data/f32/Em-T3231323.f32 E2 G3 B3 G3 E4 G3 B3 G3
 
 import fs from 'node:fs';
-import { rms, spectrumOf } from '../frontend/js/dsp.js';
-import { FLUX_N } from '../frontend/js/config.js';
-import { midiToHz, midiToName, NOTE_NAMES } from '../frontend/js/data.js';
+import { rms, spectrumOf } from '../backend/engine/dsp.js';
+import { FLUX_N } from '../backend/engine/config.js';
+import { midiToHz, midiToName, NOTE_NAMES } from '../backend/engine/data.js';
 
 const SR = 48000, CAPTURE = 16384;
 const file = process.argv[2];

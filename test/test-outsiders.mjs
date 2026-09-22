@@ -1,9 +1,9 @@
 // 和弦谱判定：不出错音时不该报外音；弹了和弦外音要报出来，并说出是什么音。
 // 用法： node test/test-outsiders.mjs
 
-import { decimate, spectrumOf } from '../frontend/js/dsp.js';
-import { chordOutsiders } from '../frontend/js/analysis.js';
-import { midiToHz, midiToName } from '../frontend/js/data.js';
+import { decimate, spectrumOf } from '../backend/engine/dsp.js';
+import { chordOutsiders } from '../backend/engine/analysis.js';
+import { midiToHz, midiToName } from '../backend/engine/data.js';
 
 const SR = 48000, DECIM = 4;
 let fail = 0;

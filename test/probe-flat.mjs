@@ -8,9 +8,9 @@
 //
 // 用法： node test/probe-flat.mjs
 
-import { decimate, spectrumOf } from '../frontend/js/dsp.js';
-import { track, novelSpectrum, resetAnalysis, candidateMismatch } from '../frontend/js/analysis.js';
-import { midiToHz, midiToName } from '../frontend/js/data.js';
+import { decimate, spectrumOf } from '../backend/engine/dsp.js';
+import { track, novelSpectrum, resetAnalysis, candidateMismatch } from '../backend/engine/analysis.js';
+import { midiToHz, midiToName } from '../backend/engine/data.js';
 
 const SR = 48000, CAPTURE = 16384, DECIM = 4;
 

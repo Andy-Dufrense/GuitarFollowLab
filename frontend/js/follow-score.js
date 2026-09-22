@@ -15,15 +15,15 @@ const BUILD = '0923-0300';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
-import { rms, spectrumOf } from './dsp.js';
+import { rms, spectrumOf } from './engine/dsp.js';
 import * as audio from './audio.js';
 import {
   track, fluxRelOf, resetAnalysis, novelSpectrum, verifyExpectedNote, chordOutsiders,
   getFluxSpec, getBeforeFluxSpec, estimateF0Near, estimateF0ByPeaks, hfFluxRelOf,
   shapeFluxOf, harmonicity, spectralSparsity, spectralFlatness, spectralPeakiness,
   dominantF0InBand, strongestF0InBand, diffMags, matchNoteByCandidates,
-} from './analysis.js';
-import { CFG, FLUX_N } from './config.js';
+} from './engine/analysis.js';
+import { CFG, FLUX_N } from './engine/config.js';
 import { createMetro } from './metro-core.js';
 // 分层：检测能力（起音层 / 判定层）各自一个文件，阈值也都收在那两个文件里。
 import { decideOnset } from './engine/onset.js';

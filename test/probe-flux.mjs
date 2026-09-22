@@ -12,7 +12,7 @@
 
 import fs from 'node:fs';
 
-const M = 'file:///E:/GuitarFollowLab/frontend/js/';
+const M = 'file:///E:/GuitarFollowLab/backend/engine/';
 const { spectrumOf } = await import(M + 'dsp.js');
 const { estimateF0ByPeaks, matchNoteByCandidates, verifyExpectedNote } = await import(M + 'analysis.js');
 

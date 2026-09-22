@@ -11,9 +11,9 @@
 //
 // 用法： node test/probe-octave.mjs
 
-import { decimate, spectrumOf } from '../frontend/js/dsp.js';
-import { track, novelSpectrum, matchNoteByCandidates, resetAnalysis } from '../frontend/js/analysis.js';
-import { midiToHz, chordVoicing, midiToName } from '../frontend/js/data.js';
+import { decimate, spectrumOf } from '../backend/engine/dsp.js';
+import { track, novelSpectrum, matchNoteByCandidates, resetAnalysis } from '../backend/engine/analysis.js';
+import { midiToHz, chordVoicing, midiToName } from '../backend/engine/data.js';
 
 const SR = 48000;
 const CAPTURE = 16384;

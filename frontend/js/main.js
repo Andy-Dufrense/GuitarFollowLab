@@ -5,15 +5,15 @@
 // 具体的算法在 analysis.js，判定策略在 judge.js，DOM 在 ui.js。
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { rms, spectrumOf } from './dsp.js';
-import { CFG } from './config.js';
+import { rms, spectrumOf } from './engine/dsp.js';
+import { CFG } from './engine/config.js';
 import { S, step, newRun } from './state.js';
 import * as audio from './audio.js';
 import {
   track, fluxRelOf, resetAnalysis, getLastMagsFull, getFluxSpec, getBeforeFluxSpec,
   novelSpectrum, matchNoteByCandidates,
-} from './analysis.js';
-import { midiToName } from './dsp.js';
+} from './engine/analysis.js';
+import { midiToName } from './engine/dsp.js';
 import { judge, settleFor, skipGroup, advance } from './judge.js';
 import { startMetro, stopMetro, autoFit, paintCurrentBeat } from './metronome.js';
 import {

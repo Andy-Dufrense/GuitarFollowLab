@@ -56,7 +56,7 @@ const xOf = (t) => (t / dur) * 1000;
 const yOf = (v) => 100 - (v / maxPeak) * 95;
 
 // ③ 频谱对照（每个起音：前 170ms / 后 170ms / 差分）
-const { spectrumOf } = await import('file:///E:/GuitarFollowLab/frontend/js/dsp.js');
+const { spectrumOf } = await import('file:///E:/GuitarFollowLab/backend/engine/dsp.js');
 const N = 8192;
 
 // ④ 声谱图：横轴时间、纵轴频率、亮度=强度。看它就是"用眼睛看声音"。

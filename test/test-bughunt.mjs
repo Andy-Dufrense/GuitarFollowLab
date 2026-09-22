@@ -10,7 +10,7 @@
 //
 // 用法： node test-bughunt.mjs
 
-import { midiToHz, chordVoicing } from '../frontend/js/data.js';
+import { midiToHz, chordVoicing } from '../backend/engine/data.js';
 import { MODES, buildRun } from '../frontend/js/exercises.js';
 
 const SR = 48000;

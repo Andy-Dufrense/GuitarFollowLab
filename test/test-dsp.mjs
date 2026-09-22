@@ -4,9 +4,9 @@
 import {
   decimate, yinPitch, spectrumOf, chromaFromSpectrum, matchChordIn, observedPitchClasses,
   hzToMidi,
-} from '../frontend/js/dsp.js';
-import { refineBySpectrum } from '../frontend/js/analysis.js';
-import { chordVoicing, midiToHz, OPEN_STRING_MIDI } from '../frontend/js/data.js';
+} from '../backend/engine/dsp.js';
+import { refineBySpectrum } from '../backend/engine/analysis.js';
+import { chordVoicing, midiToHz, OPEN_STRING_MIDI } from '../backend/engine/data.js';
 import { LIVE_CHORDS } from '../frontend/js/exercises.js';
 
 const SR = 48000;

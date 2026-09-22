@@ -11,7 +11,7 @@
 // 现在那个 return 去掉了（用户实测确认：Hey Jude 开头就是 2弦1品 那个音，
 // 不是多出来的声音）。场景 4 钉住的就是这个修复。
 
-import { midiToHz } from '../frontend/js/data.js';
+import { midiToHz } from '../backend/engine/data.js';
 
 const SR = 48000;
 const CAPTURE = 16384;

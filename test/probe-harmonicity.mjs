@@ -13,7 +13,7 @@
 
 import fs from 'node:fs';
 
-const M = 'file:///E:/GuitarFollowLab/frontend/js/';
+const M = 'file:///E:/GuitarFollowLab/backend/engine/';
 const { spectrumOf } = await import(M + 'dsp.js');
 
 const SR = 48000, N = 8192, binHz = SR / N;

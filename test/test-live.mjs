@@ -7,7 +7,7 @@
 //
 // 用法： node test-live.mjs
 
-import { chordVoicing, midiToHz } from '../frontend/js/data.js';
+import { chordVoicing, midiToHz } from '../backend/engine/data.js';
 import { MODES, buildRun } from '../frontend/js/exercises.js';
 
 const SR = 48000;

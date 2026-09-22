@@ -12,7 +12,7 @@ import path from 'node:path';
 
 const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
 const root = path.resolve(here, '..');
-const { spectrumOf } = await import('file:///E:/GuitarFollowLab/frontend/js/dsp.js');
+const { spectrumOf } = await import('file:///E:/GuitarFollowLab/backend/engine/dsp.js');
 
 let files = process.argv.slice(2);
 if (!files.length) {

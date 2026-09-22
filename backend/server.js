@@ -127,6 +127,24 @@ const handler = (req, res) => {
   }
 
   if (urlPath.endsWith('/')) urlPath += 'index.html';
+  // 检测能力层（backend/engine/）要给页面用：只读暴露这一个子目录。
+  // 前端 frontend/js/engine/*.js 只是一行转接，实体都在 backend/engine/ 里。
+  if (urlPath.startsWith('/backend/engine/')) {
+    const relEngine = path.normalize(urlPath.replace(/^\/backend\/engine\//, '')).replace(/^[/\\]+/, '');
+    const rootEngine = path.join(HERE, 'engine');
+    const fileEngine = path.join(rootEngine, relEngine);
+    if (!fileEngine.startsWith(rootEngine)) { send(res, 403, 'text/plain; charset=utf-8', '403 越界路径'); return; }
+    fs.readFile(fileEngine, (err, data) => {
+      if (err) { send(res, 404, 'text/plain; charset=utf-8', '404 找不到 ' + urlPath); return; }
+      const extE = path.extname(fileEngine).toLowerCase();
+      let mtimeMs = 0;
+      try { mtimeMs = fs.statSync(fileEngine).mtimeMs; } catch (e) { /* ignore */ }
+      send(res, 200, MIME[extE] || 'application/octet-stream', data, {
+        req, cache: cachePolicy(urlPath, extE), file: fileEngine, mtimeMs,
+      });
+    });
+    return;
+  }
   const rel = path.normalize(urlPath).replace(/^[/\\]+/, '');
   const file = path.join(ROOT, rel);
 
