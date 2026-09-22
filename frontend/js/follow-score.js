@@ -11,7 +11,7 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0922-2330';
+const BUILD = '0923-0010';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
@@ -708,6 +708,80 @@ function expectedAtMs(i) {
   return (notes[i].t - notes[0].t) * 1000 * scale;
 }
 
+// ── 跟节拍（tempo）层：一切都由**谱面时钟**驱动 ──────────────────────────────
+// 和"等我弹"（wait）严格分开：wait 那条链路一个字节都不动。
+//   · 光标：按时间走（和"试听"用的是同一份 expectedAtMs），**不跟着用户走**；
+//   · 起音：只回答"这个音的**时间窗**里，有没有出现正确的音"；
+//   · 窗口过了还没判到 → 这个音算错（窗口不会回来）。
+// 这样就不会出现"一个起音把后面好几个音一起吃掉"（用户报的"疯狂过音符"）。
+let tempoState = [];       // 每个音：'' 待判 | 'ok' | 'bad' | 'miss'
+let tempoCursor = 0;       // 光标（= 当前时间窗所在的音）
+let tempoClosed = -1;      // 已经关窗结算到第几个音
+const tempoTol = (i) => timingToleranceMs(i);
+// 这一刻的起音归到哪个音？不在任何窗口里 → -1（早了/晚了，不算这个音）
+function tempoNoteAt(ms) {
+  if (!notes || !notes.length) return -1;
+  let best = -1, bestD = Infinity;
+  for (let i = Math.max(0, tempoCursor - 2); i < notes.length; i++) {
+    const c = expectedAtMs(i);
+    if (c - tempoTol(i) > ms + 300) break;      // 后面的音还早，不用看
+    if (tempoState[i]) continue;                // 这个音已经判过了
+    const d = Math.abs(ms - c);
+    if (d <= tempoTol(i) && d < bestD) { best = i; bestD = d; }
+  }
+  return best;
+}
+// 这一下离"还没判的那个音"差多少（用来提示"你早了/晚了多少ms"）
+function tempoNearestPending(ms) {
+  let idx = -1, dev = 0, bestD = Infinity;
+  for (let i = Math.max(0, tempoCursor - 2); i < notes.length; i++) {
+    if (tempoState[i]) continue;
+    const d = ms - expectedAtMs(i);
+    if (Math.abs(d) < bestD) { bestD = Math.abs(d); idx = i; dev = d; }
+    if (expectedAtMs(i) > ms + 1000) break;
+  }
+  return { idx, dev };
+}
+// 时钟：关窗结算 + 挪光标 + 收尾。返回 true = 整曲跑完（调用方要 return）
+function tempoTick(nowMs) {
+  if (!notes || !notes.length || phase !== 'waiting') return false;
+  const t = nowMs - micStartedAt;
+  // ① 关窗：右边界过了还没判到 → 记错（用户口径：规定时间里没出现理想音就是错）
+  while (tempoClosed + 1 < notes.length
+    && t > expectedAtMs(tempoClosed + 1) + tempoTol(tempoClosed + 1)) {
+    tempoClosed++;
+    if (!tempoState[tempoClosed]) {
+      tempoState[tempoClosed] = 'miss';
+      const cur = notes[tempoClosed];
+      missed++;
+      bad++;
+      wrongList.push(`第${(cur.measure || 0) + 1}小节 漏了${midiToNameOf(cur.midi)}（时间窗内没弹）`);
+      $('wrongs').textContent = '弹错：' + wrongList.join('、');
+      $('missed').textContent = missed;
+      $('bad').textContent = bad;
+      markNote(tempoClosed, 'bad');
+      sessionLog.push({
+        no: tempoClosed + 1, t: Number((nowMs / 1000).toFixed(3)),
+        exp: cur.midi, expName: midiToNameOf(cur.midi), result: 'miss',
+      });
+      setVerdict(`漏了 ${midiToNameOf(cur.midi)}（时间窗过了），继续`, 'bad');
+    }
+  }
+  // ② 光标按时间走：落在哪个音的窗口里就指哪个音
+  let cur = tempoCursor;
+  while (cur + 1 < notes.length && t >= expectedAtMs(cur + 1) - tempoTol(cur + 1)) cur++;
+  if (cur !== tempoCursor) {
+    tempoCursor = cur;
+    noteIdx = cur;
+    highlightCurrent();
+    const nx = notes[cur];
+    if (nx) $('next').innerHTML = `当前：<b>${midiToNameOf(nx.midi)}</b>（${nx.string}弦 ${nx.fret}品）`;
+  }
+  // ③ 最后一个音的时间窗也过了 → 整曲结束
+  if (tempoClosed >= notes.length - 1) { finishSession(); return true; }
+  return false;
+}
+
 async function loadNotes() {
   // 全部音符（原来只取前 60 个，所以光标走到一半多就"结束"了）
   if (!notes) notes = (await (await fetch('./data/hey_jude.json')).json()).notes;
@@ -786,27 +860,10 @@ function micTick() {
       : '开始 —— 弹第一个音', couplingDetected ? 'bad' : '');
     highlightCurrent();                        // 开始就把光标摆到第一个音上
   }
-  // ── 时间片：这个音的时间窗过完了还没听到 → 记"漏"，往下走 ──────────────
-  // 时值内的延音不算漏（谱面说要响这么久），但窗关了就说明这个音没弹。
-  // "时间窗过期记漏"只在**跟节拍**模式下成立。
-  // "等我弹"的语义是"你没弹它就一直等"，那时绝不能记漏 ——
-  // 否则你弹一个长音（延音）时窗一过就被记成漏并往下走，等于逼你再弹一次。
-  if (modeKind === 'tempo' && phase === 'waiting' && noteClockStart != null && notes && notes[noteIdx]) {
-    const cur = notes[noteIdx];
-    const win = Math.max(cur.dur || 0, 0.35) + 0.25;   // 时值 + 一点宽容
-    if ((now - noteClockStart) / 1000 > win) {
-      missed++;
-      sessionLog.push({
-        no: noteIdx + 1, t: Number((now / 1000).toFixed(3)),
-        exp: cur.midi, expName: midiToNameOf(cur.midi), result: 'miss',
-      });
-      $('missed').textContent = missed;
-      wrongList.push(`第${noteIdx + 1}个音（漏：${midiToNameOf(cur.midi)}）`);
-      $('wrongs').textContent = (wrongList.length ? '弹错/漏：' + wrongList.join('、') : '');
-      setVerdict(`漏了 ${midiToNameOf(cur.midi)}（时间窗过了），继续`, 'bad');
-      advanceNote();
-    }
-  }
+  // ── 跟节拍：光标和时间窗**全部由谱面时钟驱动**（和"等我弹"完全分开）──────
+  // 每次主循环只做一件事：关掉已经过期的窗口、把光标挪到当前时间窗。
+  // 起音只负责回答"这个窗口里有没有正确的音"，所以不存在"一个起音吃好几个音"。
+  if (modeKind === 'tempo' && phase === 'waiting' && tempoTick(now)) return;
   const lagged = levelHist.length >= 3 ? levelHist[levelHist.length - 3] : 0;
   // 起音判据调严一点：真拨弦是"明显"的一跳，环境声/说话不该触发。
   // 门限：比"脏环境"那版严一点，但别严到把正常拨弦挡掉
@@ -1074,26 +1131,29 @@ function micTick() {
       let best = noteIdx;
       let devMs = null;
       if (modeKind === 'tempo') {
-        // ── 检查模式：这一下**按时间**该算谱面第几个音 ────────────────────
-        // 练习模式的规矩是"你不弹我不走"；检查模式相反 —— 谱面按速度自己走，
-        // 所以要拿"这一下的时刻"去对号，而不是"下一个还没判过的音"。
+        // ── 跟节拍：这一下**只看它落没落在某个音的时间窗里** ────────────────
+        // 不往前跳、也不把中间的音一起吃掉：窗口过期是"时钟"那边的事（tempoTick）。
+        // 落在窗口外（弹早了/弹晚了）→ 这个起音不算数，等窗口关掉记错。
         const elapsed = onsetAtMs - micStartedAt;
-        let k = -1, bestD = Infinity;
-        for (let j = Math.max(0, noteIdx); j < notes.length; j++) {
-          const d = Math.abs(elapsed - expectedAtMs(j));
-          if (d < bestD) { bestD = d; k = j; }
-          if (expectedAtMs(j) > elapsed + 400) break;     // 后面的只差更远，不用再看
+        const k = tempoNoteAt(elapsed);
+        if (k < 0) {
+          // 落在所有时间窗之外（弹早了/弹晚了）→ 这个音**不判**，
+          // 它对应的那个音会在窗口关掉时按"错"记（用户口径：规定时间里没出现理想音就是错）。
+          // 顺手把"你这下比第几个音早了/晚了多少ms"报给用户，方便他自己对拍子。
+          const near = tempoNearestPending(elapsed);
+          if (near.idx >= 0 && Math.abs(near.dev) <= tempoTol(near.idx) * 3) {
+            timingDevs.push(near.dev);
+            timingTolMs = tempoTol(near.idx);
+            if (near.dev < 0) earlyCount++; else lateCount++;
+            setVerdict(`这一下比第${near.idx + 1}个音${near.dev < 0 ? '早' : '晚'}了 `
+              + `${Math.abs(Math.round(near.dev))}ms（容许 ±${Math.round(tempoTol(near.idx))}ms）`
+              + ` —— 那个音按错算，继续`, 'bad');
+          }
+          micTimer = requestAnimationFrame(micTick);
+          return;
         }
-        if (k < 0) k = noteIdx;
-        // 中间被你跳过（没弹）的音：检查模式不等，直接记漏
-        for (let j = noteIdx; j < k; j++) {
-          missed++;
-          wrongList.push(`第${(notes[j].measure || 0) + 1}小节 漏了${midiToNameOf(notes[j].midi)}`);
-        }
-        if (k > noteIdx) { $('missed').textContent = missed; }
         best = k;
-        noteIdx = k;
-        noteClockStart = now;
+        noteIdx = k;             // 只是把"当前音"对齐到这一下；光标仍由时钟驱动
         devMs = elapsed - expectedAtMs(k);
       }
       if (!notes[best]) { stopMic(); return; }
@@ -1429,7 +1489,12 @@ function micTick() {
         $('wrongs').textContent = '弹错：' + wrongList.join('、');
       }
       const judgedNo = best + 1;
-      advanceNote();
+      if (modeKind === 'tempo') {
+        // 跟节拍：判完只标记这个音，光标/时间轴继续按时钟走（不推进 noteIdx）
+        tempoState[best] = pass ? 'ok' : 'bad';
+      } else {
+        advanceNote();
+      }
       if (api && exp.t != null) api.timePosition = (exp.t + (exp.dur || 0)) * 1000;
     }
     $('good').textContent = good;
@@ -1457,6 +1522,31 @@ const judgedNoForLog = (idx) => idx + 1;
 
 // 往下走一格：把"当前音"的时钟重置，光标挪到下一个音，并把新音的窗口重新开始计时。
 // 时间片模型下，推进只有三个入口：判对、判错、窗口过了算漏。
+// 整段结束时的收尾（两条链路共用：wait 判完最后一个音 / tempo 时间轴跑完）
+function finishSession() {
+  stopMic();
+  // 练琴闭环的最后一环：整段结果（对/错/漏 + 最常出问题的地方）
+  const judged = good + bad;
+  const acc = judged ? Math.round((good / judged) * 100) : 0;
+  const ok = acc >= 90;                        // 正确率 ≥90% 这份作业算完成
+  const head = `整段弹完 —— 对 ${good} ／ 错 ${bad} ／ 测不准 ${unclearCount}`
+    + `　正确率 ${acc}%（${ok ? '✅ 这份作业算完成' : '还没到 90%，建议重练'}）`;
+  const todo = wrongList.length
+    ? `　要改的地方：${wrongList.slice(0, 5).join('、')}${wrongList.length > 5 ? ' 等' : ''}`
+    : '　（没有错音，漂亮）';
+  // 跟节拍才有的时间账：偏差中位数 / 最大 / 抢拍几处 / 拖拍几处。
+  // 不和音准合成一个"对/错"——用户被标红时要能看出错在音还是错在拍。
+  let timLine = '';
+  if (modeKind === 'tempo' && timingDevs.length) {
+    const abs = timingDevs.map(Math.abs).slice().sort((a, b) => a - b);
+    const med = Math.round(timingDevs.slice().sort((a, b) => a - b)[Math.floor(timingDevs.length / 2)]);
+    timLine = `　节奏：偏差中位 ${med >= 0 ? '+' : ''}${med}ms／最大 ${Math.round(abs[abs.length - 1])}ms`
+      + `，抢拍 ${earlyCount} 处、拖拍 ${lateCount} 处（容许 ±${Math.round(timingTolMs)}ms）`;
+  }
+  setVerdict(head + todo + timLine, ok ? 'ok' : 'bad');
+  $('next').innerHTML = '想再练一遍？直接再点一次「跟弹」（或点谱面上任意一个音从那开始）。';
+}
+
 function advanceNote() {
   // 按谱面间距设"下一次至少隔多久才算新的拨弦"：
   // 快音段（间距 150ms）约 80ms 后可再触发，慢音段最多等到 160ms。
@@ -1474,27 +1564,7 @@ function advanceNote() {
   heardInWindow = false;
   $('pos').textContent = `${Math.min(noteIdx, (notes || []).length)}/${(notes || []).length}`;
   if (noteIdx >= (notes || []).length) {
-    stopMic();
-    // 练琴闭环的最后一环：整段结果（对/错/漏 + 最常出问题的地方）
-    const judged = good + bad;
-    const acc = judged ? Math.round((good / judged) * 100) : 0;
-    const ok = acc >= 90;                        // 正确率 ≥90% 这份作业算完成
-    const head = `整段弹完 —— 对 ${good} ／ 错 ${bad} ／ 测不准 ${unclearCount}`
-      + `　正确率 ${acc}%（${ok ? '✅ 这份作业算完成' : '还没到 90%，建议重练'}）`;
-    const todo = wrongList.length
-      ? `　要改的地方：${wrongList.slice(0, 5).join('、')}${wrongList.length > 5 ? ' 等' : ''}`
-      : '　（没有错音，漂亮）';
-    // 检查模式才有的时间账：偏差中位数 / 最大 / 抢拍几处 / 拖拍几处。
-    // 不和音准合成一个"对/错"——用户被标红时要能看出错在音还是错在拍。
-    let timLine = '';
-    if (modeKind === 'tempo' && timingDevs.length) {
-      const abs = timingDevs.map(Math.abs).slice().sort((a, b) => a - b);
-      const med = Math.round(timingDevs.slice().sort((a, b) => a - b)[Math.floor(timingDevs.length / 2)]);
-      timLine = `　节奏：偏差中位 ${med >= 0 ? '+' : ''}${med}ms／最大 ${Math.round(abs[abs.length - 1])}ms`
-        + `，抢拍 ${earlyCount} 处、拖拍 ${lateCount} 处（容许 ±${Math.round(timingTolMs)}ms）`;
-    }
-    setVerdict(head + todo + timLine, ok ? 'ok' : 'bad');
-    $('next').innerHTML = '想再练一遍？直接再点一次「跟弹」（或点谱面上任意一个音从那开始）。';
+    finishSession();
     return;
   }
   highlightCurrent();
@@ -1539,6 +1609,10 @@ async function startMic() {
   micStartedAt = performance.now();
   $('good').textContent = '0'; $('bad').textContent = '0';
   if (songKind === 'heyjude') await loadNotes();
+  // 跟节拍：每次开始都清空状态（每个音先记成"待判"）
+  tempoState = (notes || []).map(() => '');
+  tempoCursor = 0;
+  tempoClosed = -1;
   // 音符加载后重建"光标→谱面"对应表（按**当前选中的声部**）
   if (score) buildTickMap(score, Number($('track') && $('track').value) || 0);
   else await loadChords();

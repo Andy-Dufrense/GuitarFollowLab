@@ -124,6 +124,8 @@ globalThis.__vcSession = [];
 const $ = (id) => reg.get(id) || document.getElementById(id);
 
 console.log('\n=== 点「跟弹」，用真实录音跑完整段 ===');
+// VC_MODE=tempo：按"跟节拍"模式跑（默认是"等我弹"）
+if (process.env.VC_MODE) document.getElementById('mode').value = process.env.VC_MODE;
 await $('mic').onclick();                       // 取麦 + 四拍 + 开始
 const totalMs = Math.ceil((AUDIO.length / SR) * 1000);
 let frames = 0;
