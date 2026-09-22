@@ -11,7 +11,7 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0923-0800';
+const BUILD = '0923-0900';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
@@ -731,7 +731,22 @@ const metro = createMetro({ getCtx: () => audio.getCtx() });
 function startMetronome() { return metro.start({ bpm: userBpm }); }
 function stopMetronome() { metro.stop(); }
 
+// 判定主循环外面包一层"防摔"：循环里任何一处抛异常，都会把整条 requestAnimationFrame
+// 链掐断 —— 用户看到的就是"卡死，再怎么弹都没反应"（2026-09-22 实测过一次：
+// 起音台账里最后一条有电平/flux、却没有判定结果，也没有被丢弃的记录）。
+// 现在出错只报一行、把相位放回 waiting，然后**继续跑**。
 function micTick() {
+  try {
+    micTickBody();
+  } catch (e) {
+    const msg = (e && e.message) ? e.message : String(e);
+    err('判定循环出错（已自动继续）：' + msg);
+    if (phase === 'settling') phase = 'waiting';
+    micTimer = requestAnimationFrame(micTick);
+  }
+}
+
+function micTickBody() {
   const buf = audio.readFrame();
   if (!buf) { micTimer = requestAnimationFrame(micTick); return; }
   const lv = rms(buf, buf.length - 1024, 1024);
@@ -1178,6 +1193,7 @@ function micTick() {
           });
           best += 1;
           exp = notes[best];
+          if (!exp) { stopMic(); return; }      // 跳过去的是最后一个音 → 收尾，别让后面读空
           candMatch = r2;
           candSelf = r2.self; candRival = r2.rival; candBest = r2.best;
           noteIdx = best;
