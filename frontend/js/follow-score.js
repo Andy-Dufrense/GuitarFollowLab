@@ -11,7 +11,7 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0923-1000';
+const BUILD = '0923-1030';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
@@ -43,9 +43,13 @@ let chordIdx = -1;
 let beatTimer = 0;
 let beat = 0;
 let userBpm = 76;
-// 变调夹：夹 N 品时，谱面同一个品位的**实际音高**要高 N 个半音。
-// 判定用的"期望音"= 谱面音 + capo；页面上显示的音名仍是谱面写的那个（弹的人还是照谱子弹）。
+// 变调夹 + 调弦：这两个都只是"期望音整体平移"——
+//   · 变调夹 N 品：同一个品位实际音高**高** N 个半音（+N）
+//   · 降半音调弦（Eb）：整把琴低一个半音（-1）
+// 判定用的"期望音"= 谱面音 + pitchShift；页面上显示的音名仍是谱面写的那个（弹的人照谱子弹）。
 let capo = 0;
+let tuneDown = false;
+const pitchShift = () => capo + (tuneDown ? -1 : 0);
 let rising = false;
 // 判过所需的领先倍数。默认 1.15 是拍的量级，还没用真机录音标定 ——
 // 允许用 window.__passRatio 覆盖，方便拿真实录音扫一遍找合适的值。
@@ -469,8 +473,13 @@ $('speed').onchange = () => {
 };
 // 变调夹：改了就立刻生效（下一次判定就用新值）。夹多少品，期望音就升多少半音。
 $('capo').onchange = () => {
-  capo = Math.max(0, Math.min(12, Number($('capo').value) || 0));
-  setVerdict(capo ? `变调夹 ${capo} 品 —— 期望音整体升高 ${capo} 个半音（谱面记号不变）` : '变调夹 0 品');
+  capo = Math.max(0, Math.min(6, Number($('capo').value) || 0));
+  setVerdict(`变调夹 ${capo} 品${tuneDown ? ' + 降半音' : ''} —— 期望音整体平移 ${pitchShift() > 0 ? '+' : ''}${pitchShift()} 个半音（谱面记号不变）`);
+};
+$('tuneDown').onchange = () => {
+  tuneDown = !!$('tuneDown').checked;
+  setVerdict(`调弦：${tuneDown ? '降半音（Eb）' : '标准'}${capo ? ` + 变调夹 ${capo} 品` : ''}`
+    + ` —— 期望音整体平移 ${pitchShift() > 0 ? '+' : ''}${pitchShift()} 个半音（谱面记号不变）`);
 };
 
 // ── 跟弹：麦克风判定 ─────────────────────────────────────────────────────────
@@ -1102,7 +1111,7 @@ function micTickBody() {
           for (const c of cands) {
             // 窗内的情况只做"微调"：kIn 存在时，只有候选比它更贴（差 > 40）才换
             if (kIn >= 0 && c.j !== kIn && !c.inWin) continue;
-            const r = judgeNote({ spec: specE, sampleRate: srNow, fftSize: N, expectedMidi: notes[c.j].midi + capo });
+            const r = judgeNote({ spec: specE, sampleRate: srNow, fftSize: N, expectedMidi: notes[c.j].midi + pitchShift() });
             if (!r.self || !(r.self.mismatch < 250)) continue;
             const loss = r.self.mismatch + Math.abs(c.d) / 2 + (c.j === kIn ? -40 : 0);
             if (loss < pickLoss) { pickLoss = loss; pick = c.j; pickInWin = c.inWin; }
@@ -1166,7 +1175,7 @@ function micTickBody() {
       // spec 就是"判定这一刻往回 170ms"那扇窗，也就是 test/gt-notes.mjs 里验过的那扇。
       // 判定层在 engine/judger.js（候选重排 + 判过规则 + 阈值）
       let candMatch = JUDGE_CAND
-        ? judgeNote({ spec, sampleRate: specRate, fftSize: specN, expectedMidi: exp.midi + capo })
+        ? judgeNote({ spec, sampleRate: specRate, fftSize: specN, expectedMidi: exp.midi + pitchShift() })
         : null;
       let candSelf = candMatch ? candMatch.self : null;
       let candRival = candMatch ? candMatch.rival : null;
@@ -1179,7 +1188,7 @@ function micTickBody() {
       // 且下一个音自己明显更贴（失配好 60 以上）。这样不会把正常演奏判成"跳音"。
       if (modeKind !== 'tempo' && candMatch && candBest && candSelf && notes[best + 1]
         && candBest.midi === notes[best + 1].midi && candSelf.mismatch > 200) {
-        const r2 = judgeNote({ spec, sampleRate: specRate, fftSize: specN, expectedMidi: notes[best + 1].midi + capo });
+        const r2 = judgeNote({ spec, sampleRate: specRate, fftSize: specN, expectedMidi: notes[best + 1].midi + pitchShift() });
         if (r2.self && r2.self.mismatch + 60 < candSelf.mismatch) {
           // 当前这个音：你没弹它 → 记"漏"（不是判你弹错）
           missed++;
@@ -1263,11 +1272,11 @@ function micTickBody() {
       // （需要环形缓存 + 记住起音采样位置），不能在"判定这一刻的 340ms 长窗"上用。
       // 那条路（差分谱 = 攻击前短窗 − 攻击后短窗）是 1弦1品 和 快音 的共同正解，
       // 但今天不做 —— 见对话记录里的取舍：不在没有离线验证的情况下再改测量。
-      const est = estimateF0Near(onsetPeakSpec || novel, peakRate, 8192, exp.midi + capo, fit);
+      const est = estimateF0Near(onsetPeakSpec || novel, peakRate, 8192, exp.midi + pitchShift(), fit);
       // 差分谱上的同一把尺子（范围放宽到 ±250）：这就是"不看上一个音、也不看答案"
       // 的那一次量 —— 判定优先用它。
       const estDiff = onsetDiffSpec
-        ? estimateF0Near(onsetDiffSpec, peakRate, 8192, exp.midi + capo, { rangeCents: 250, tolCents: 15 })
+        ? estimateF0Near(onsetDiffSpec, peakRate, 8192, exp.midi + pitchShift(), { rangeCents: 250, tolCents: 15 })
         : null;
       const useDiff = !!(JUDGE_DIFF && estDiff && estDiff.score > 0);
       const estJ = useDiff ? estDiff : est;
@@ -1277,7 +1286,7 @@ function micTickBody() {
       let confirmCents = null;
       try {
         const cs = judgeSpec || spectrumOf(buf.subarray(Math.max(0, buf.length - PEAK_N)));
-        const ce = estimateF0Near(cs, peakRate, PEAK_N, exp.midi + capo, fit);
+        const ce = estimateF0Near(cs, peakRate, PEAK_N, exp.midi + pitchShift(), fit);
         if (ce && ce.score > 0) confirmCents = ce.cents;
       } catch (e) { confirmCents = null; }
       const dom = { hz: estJ.f0, mag: estJ.score, sharp: 1, cents: estJ.cents };
@@ -1289,7 +1298,7 @@ function micTickBody() {
       // （这是项目最早就知道的事，我这两天才又把判定接回它上面）。
       // 判定窗是"起音后约 90ms 往回 170ms"，大部分是新拨的那个音。
       // estP = 判定窗上的多谐波测量（这就是上面那个"准 6 倍"的值）
-      const estP = estimateF0ByPeaks(spec, specRate, specN, exp.midi + capo, {});
+      const estP = estimateF0ByPeaks(spec, specRate, specN, exp.midi + pitchShift(), {});
       // ⚠ 试过改用"判定窗"（estP.cents）：它看着准（中位 9.9 音分），但**什么都判对** ——
       // 用户 18:24 那份"随便弹"的记录里，用它 64/66 仍然判对。原因和快照一样：
       // **都是锚在谱面那个音上找**，任何输入都能在期望音附近找到点东西。
@@ -1398,7 +1407,7 @@ function micTickBody() {
         // 候选重排挑出来的那个音 = "你实际弹的是什么"（这条路不是锚在本音上找的，所以可信）
         seenMidi = candBest.midi;
       } else if (!pass && !unclear) {
-        const wide = estimateF0ByPeaks(spec, specRate, specN, exp.midi + capo, { tolCents: 140 });
+        const wide = estimateF0ByPeaks(spec, specRate, specN, exp.midi + pitchShift(), { tolCents: 140 });
         if (wide.score > 0 && wide.nHarm >= 2) {
           const wC = wide.cents - tuning;
           if (Math.abs(wC) <= 250) { seenMidi = Math.round(69 + 12 * Math.log2(wide.f0 / 440) - tuning / 100); seenCents = wC; }
@@ -1619,7 +1628,8 @@ async function startMic() {
   frames = 0; floor = 0.001; levelHist = []; lastOnsetMs = -1e9;
   good = 0; bad = 0; rise = null;
   // 变调夹 / BPM 在开弹这一刻读一次（设置面板里改了立刻生效）
-  capo = Math.max(0, Math.min(12, Number($('capo') && $('capo').value) || 0));
+  capo = Math.max(0, Math.min(6, Number($('capo') && $('capo').value) || 0));
+  tuneDown = !!($('tuneDown') && $('tuneDown').checked);
   userBpm = Number($('speed') && $('speed').value) || userBpm || 76;
   // 从哪里开始：
   //   · 默认**永远从第一个音开始** —— 不然中途停过一遍，noteIdx 残留，
