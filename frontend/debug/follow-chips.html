@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>跟弹</title>
+<style>
+:root { --ink:#1c1b1a; --dim:#8a857e; --line:#e6e2db; --ok:#1f9d55; --bad:#d64545; --now:#1f6feb; }
+* { box-sizing:border-box; }
+body { margin:0; font:16px/1.5 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; color:var(--ink); background:#fbfaf7; }
+header { display:flex; align-items:baseline; gap:10px; padding:14px 18px; border-bottom:1px solid var(--line); background:#fff; }
+header h1 { font-size:17px; margin:0; font-weight:600; }
+header .who { color:var(--dim); font-size:13px; }
+header .grow { flex:1; }
+header button { font:inherit; padding:8px 18px; border-radius:999px; border:0; background:var(--now); color:#fff; cursor:pointer; }
+header button.stop { background:#444; }
+main { max-width:900px; margin:0 auto; padding:18px; }
+.score { background:#fff; border:1px solid var(--line); border-radius:14px; padding:14px 10px; display:flex; gap:6px; overflow-x:auto; scroll-behavior:smooth; }
+.n { flex:0 0 auto; width:58px; text-align:center; padding:8px 0 6px; border-radius:10px; border:1px solid transparent; }
+.n .nm { font-size:18px; font-weight:600; }
+.n .fin { font-size:11px; color:var(--dim); }
+.n.now { border-color:var(--now); background:#eef4ff; }
+.n.ok .nm { color:var(--ok); }
+.n.bad { background:#fdecec; }
+.n.bad .nm { color:var(--bad); }
+.n.past { opacity:.55; }
+.bar { height:4px; background:var(--line); border-radius:9px; margin:14px 0 6px; overflow:hidden; }
+.bar i { display:block; height:100%; width:0; background:var(--now); transition:width .15s; }
+.state { display:flex; gap:14px; align-items:center; margin-top:10px; color:var(--dim); font-size:13px; }
+.state b { color:var(--ink); font-weight:600; }
+.verdict { margin-top:14px; padding:12px 14px; border-radius:12px; background:#fff; border:1px solid var(--line); min-height:22px; }
+.verdict.ok { border-color:var(--ok); color:var(--ok); }
+.verdict.bad { border-color:var(--bad); color:var(--bad); }
+.hint { margin-top:12px; color:var(--dim); font-size:13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">跟弹</h1>
+  <span class="who" id="who"></span>
+  <span class="grow"></span>
+  <label class="who">速度 <input id="bpmIn" type="number" min="40" max="200" step="2" value="76" style="width:64px;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:8px;text-align:right"> BPM</label>
+  <button id="btn">开始</button>
+</header>
+<main>
+  <div class="score" id="score"></div>
+  <div class="bar"><i id="prog"></i></div>
+  <div class="state">
+    <span>进度 <b id="pos">0/0</b></span>
+    <span>听到 <b id="heard">—</b></span>
+    <span>对 <b id="good">0</b></span>
+    <span>错 <b id="bad">0</b></span>
+    <span>速度 <b id="bpm">—</b></span>
+  </div>
+  <div class="verdict" id="verdict">点右上角「开始」，允许麦克风权限</div>
+  <p class="hint">跟着谱面往下弹。弹错了不会停 —— 那一格标红，然后继续（跟弹就是这样）。</p>
+</main>
+<script type="module" src="../js/follow.js"></script>
+</body>
+</html>

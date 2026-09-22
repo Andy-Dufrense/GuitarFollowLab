@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>吉他跟弹识别</title>
+<link rel="stylesheet" href="../live.css">
+</head>
+<body>
+
+<header class="bar">
+  <span class="logo">🎸 吉他跟弹识别</span>
+  <span class="tagline">对着麦克风弹，弹对了自动进下一个</span>
+</header>
+
+<nav class="modes" id="modes"></nav>
+<nav class="levels" id="levels"></nav>
+
+<main class="wrap">
+
+  <section class="stage">
+    <p class="stepno" id="stepno">准备</p>
+
+    <div class="techbadge" id="techbadge"></div>
+    <div class="target" id="target">—</div>
+    <p class="where" id="where"></p>
+    <div class="frets" id="frets"></div>
+
+    <div class="phrasewrap" id="phrasewrap">
+      <div class="phraselabel" id="phraselabel"></div>
+      <div class="phrase" id="phrase"></div>
+    </div>
+
+    <p class="hintline" id="hintline"></p>
+
+    <div class="heard">
+      <span class="hl">听到</span>
+      <span class="hv" id="heardval">—</span>
+      <span class="hc" id="heardcents"></span>
+    </div>
+
+    <div class="verdict idle" id="verdict">点下面的按钮开始，会请求麦克风权限</div>
+
+    <div class="bootfail" id="bootfail"></div>
+
+    <div class="actions">
+      <button class="big" id="btnStart">开始</button>
+      <button class="ghost" id="btnSkip">跳过这一步</button>
+      <button class="ghost" id="btnReset">重来</button>
+    </div>
+  </section>
+
+  <aside class="side">
+    <div class="card">
+      <div class="lvltitle">输入电平</div>
+      <div class="levelbar"><i id="levelfill"></i><u id="gatemark"></u></div>
+      <div class="lvlnum">电平 <span id="lvlnum">0.0000</span> · 门限 <span id="gatenum">—</span>
+        · 环境噪声 <span id="floornum">—</span></div>
+      <p class="lvlhint">弹一下，绿条要明显盖过白色门限线。盖不过就把琴靠近麦克风。</p>
+    </div>
+
+    <div class="card">
+      <div class="lvltitle">进度</div>
+      <div class="dots" id="dots"></div>
+      <div class="recent" id="recent"></div>
+    </div>
+
+    <div class="card">
+      <div class="lvltitle">节拍器</div>
+      <div class="metrohead">
+        <button class="ghost" id="btnMetro">开始</button>
+        <span class="bpm"><b id="bpmval">80</b> BPM</span>
+      </div>
+      <input type="range" id="s-bpm" min="40" max="240" step="1" value="80">
+      <div class="beats" id="beats"><i></i><i></i><i></i><i></i></div>
+      <label class="switch mt"><input type="checkbox" id="c-sound"><span class="track"></span>
+        <span class="slabel">出声</span><span class="sval" id="soundhint">（默认不出声，只看闪灯）</span></label>
+      <p class="rowhint" id="soundsay">开声音的话，节拍器的响声会被麦克风收进去，可能当成你在弹。要用声音请戴耳机。</p>
+      <label class="switch mt"><input type="checkbox" id="c-autofit" checked><span class="track"></span>
+        <span class="slabel">跟着 BPM 自动调参数</span></label>
+      <p class="rowhint" id="autofit-note">判定等待 90ms · 最小间隔 90ms</p>
+      <div class="metrostat" id="metrostat">跟着节拍弹，这里会显示你偏早偏晚多少毫秒</div>
+    </div>
+
+    <details class="adv" id="diagbox">
+      <summary>麦克风开不了？点这里看原因</summary>
+      <div class="advbody" id="diagbody"></div>
+    </details>
+
+    <details class="adv">
+      <summary>高级设置</summary>
+      <div class="advbody">
+        <label class="row"><span>音高容差</span><output id="o-tol">±45 音分</output>
+          <input type="range" id="s-tol" min="15" max="80" step="5" value="45"></label>
+        <p class="rowhint">一个半音是 100 音分。按弦力度不同会让音高飘十几个音分，别设太小。</p>
+
+        <label class="row"><span>起始灵敏度</span><output id="o-sen">3.0×</output>
+          <input type="range" id="s-sen" min="1.5" max="8" step="0.1" value="3"></label>
+        <p class="rowhint">弹得轻就调高，误触发多就调低。</p>
+
+        <label class="row"><span>听音时长</span><output id="o-set">130 ms</output>
+          <input type="range" id="s-set" min="80" max="600" step="10" value="130"></label>
+        <p class="rowhint">从起音到开始测量的等待时间。击勾弦 / 滑音默认已经加长了。</p>
+
+        <label class="row"><span>和弦匹配阈值</span><output id="o-chd">0.72</output>
+          <input type="range" id="s-chd" min="0.5" max="0.95" step="0.01" value="0.72"></label>
+        <p class="rowhint">音级指纹的相似度门限。认不出来就调低，老认错就调高。</p>
+
+        <label class="row"><span>变调夹</span><output id="o-capo">不夹</output>
+          <input type="range" id="s-capo" min="0" max="7" step="1" value="0"></label>
+        <p class="rowhint">夹在第几品，所有目标音高整体上移几度，和弦识别也会跟着转调。</p>
+      </div>
+    </details>
+
+    <div class="tipbox" id="tipbox"></div>
+  </aside>
+
+</main>
+
+<script>
+/* 这一段故意用最老式的写法，因为它的任务就是"当其它一切都没跑起来时还能报个错"。
+   1) IE 既不认 ES module 也没有 getUserMedia，直接换掉整个页面
+   2) 微信/QQ 这类内置浏览器经常不给麦克风，提醒换系统浏览器
+   3) 主脚本 2.5 秒还没起来（浏览器太旧 / module 没解析），在页面上说明原因 */
+(function () {
+  var ua = navigator.userAgent || '';
+  var inApp = /MicroMessenger|QQ\/|QQBrowser|DingTalk|Weibo|AlipayClient|UCBrowser|Quark|baiduboxapp/i.test(ua);
+  window.__inAppBrowser = inApp;
+
+  if (document.documentMode) {
+    document.body.innerHTML =
+      '<div style="font:16px/1.9 \'Microsoft YaHei\',sans-serif;color:#e9edf4;background:#0e1014;padding:56px 40px;min-height:100vh">'
+      + '<h1 style="font-size:22px;margin:0 0 18px">这个页面用 Internet Explorer 打不开</h1>'
+      + '<p style="margin:0 0 10px">它要用到 Web Audio 和麦克风采集，IE 都不支持。</p>'
+      + '<p style="margin:0 0 10px">请用 Edge 或 Chrome 打开这个地址：</p>'
+      + '<p style="font-size:20px;color:#5b9dff;margin:0 0 12px">http://localhost:1209</p>'
+      + '<p style="color:#8b95a8;margin:0">双击 start.bat 会自动用正确的浏览器打开。</p>'
+      + '</div>';
+    return;
+  }
+
+  window.addEventListener('load', function () {
+    setTimeout(function () {
+      if (window.__appReady) return;
+      var el = document.getElementById('bootfail');
+      if (!el) return;
+      var msg = inApp
+        ? '你现在是在微信/QQ 这类内置浏览器里打开的，它们普遍不给麦克风权限，页面脚本也常常跑不起来。<br>'
+          + '点右上角「⋯」→「在浏览器中打开」，用系统自带的 Chrome / Safari 再试。'
+        : '页面脚本没有跑起来。多半是这个浏览器太旧，不认识 ES module。<br>'
+          + '换 Chrome / Edge / Safari 试试。';
+      el.innerHTML = '<b>页面没能启动</b><br>' + msg + '<div class="ua"></div>';
+      el.querySelector('.ua').textContent = ua;
+      el.style.display = 'block';
+    }, 2500);
+  });
+})();
+</script>
+
+<script type="module" src="../js/main.js"></script>
+</body>
+</html>

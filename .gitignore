@@ -1,0 +1,32 @@
+# --- OS / 编辑器 ---
+Thumbs.db
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# --- AI / 工具缓存 ---
+.claude/
+.agents/
+.codex/
+
+# --- 本地补丁备份 / 临时文件 ---
+*.bak
+*.bak-*
+*.tmp
+tmp/
+node_modules/
+
+# --- 本机自签证书（backend/make-cert.bat 随时能重跑）---
+backend/certs/
+
+# --- 生成物：声谱图页面（test/spectro.mjs 两秒重跑一次就有）---
+frontend/spectro.html
+sound_data/f32/看频谱.html
+sound_data/f32/*.png
+sound_data/f32/report-*.html
+
+# --- 批量评分的中间结果（test/grade.mjs 每次跑都会重写）---
+grade-*.json

@@ -1,0 +1,14 @@
+{
+  "meta": {
+    "title": "和弦练习",
+    "artist": "示范谱（C–Am–F–G 循环）",
+    "tempo": 76,
+    "kind": "chords"
+  },
+  "chords": [
+    { "name": "C",  "midis": [48, 52, 55, 60, 64], "voicing": "5弦3品 → 1弦空弦" },
+    { "name": "Am", "midis": [45, 50, 52, 57, 60], "voicing": "5弦空弦 → 1弦空弦" },
+    { "name": "F",  "midis": [41, 48, 53, 57, 60], "voicing": "大横按（简化 F）" },
+    { "name": "G",  "midis": [43, 47, 50, 55, 59], "voicing": "6弦3品 → 1弦3品" }
+  ]
+}

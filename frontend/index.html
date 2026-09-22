@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#ffffff">
+<title>跟弹</title>
+<style>
+:root { --ink:#22201d; --dim:#8b857c; --line:#e9e5de; --ok:#1a8a4a; --bad:#cc4444; --now:#2f6bd8; --bg:#f7f5f1; --card:#fff; }
+* { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+html, body { height:100%; }
+body { margin:0; font:16px/1.5 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; color:var(--ink);
+  background:var(--bg); display:flex; flex-direction:column; overflow:hidden; }
+
+/* 顶栏：只有歌名 + 两个主按钮 + 一个设置开关，尽量矮 */
+header { display:flex; align-items:center; gap:8px; padding:8px 10px; background:var(--card);
+  border-bottom:1px solid var(--line); }
+header h1 { font-size:15px; margin:0; font-weight:600; flex:1 1 auto; white-space:nowrap;
+  overflow:hidden; text-overflow:ellipsis; }
+button, select, input[type=number] { font:inherit; border-radius:11px; border:1px solid var(--line);
+  background:var(--card); color:inherit; padding:9px 13px; min-height:42px; flex:0 0 auto; }
+button:active { background:#f0ece5; }
+button.on { background:#444; border-color:#444; color:#fff; }
+#play { font-weight:600; }
+#mic { background:var(--now); border-color:var(--now); color:#fff; font-weight:600; }
+#mic.on { background:#444; border-color:#444; }
+
+/* 设置面板：默认收起，展开也只是薄薄一条 */
+#settings { display:none; flex-wrap:wrap; gap:8px; padding:8px 10px; background:#fcfbf9;
+  border-bottom:1px solid var(--line); align-items:center; }
+#settings.open { display:flex; }
+#settings label { color:var(--dim); font-size:13px; display:flex; align-items:center; gap:6px; }
+input[type=number] { width:72px; text-align:right; }
+
+/* 谱面：页面的大头 */
+main { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; padding:8px 8px 0; }
+#scoreWrap { flex:1 1 auto; min-height:0; overflow:auto; -webkit-overflow-scrolling:touch;
+  background:var(--card); border:1px solid var(--line); border-radius:14px; padding:6px 4px 12px;
+  box-shadow:0 1px 4px rgba(0,0,0,.04); }
+#score { width:100%; min-width:0; position:relative; }
+#cursor { position:absolute; display:none; pointer-events:none; z-index:9;
+  background:rgba(47,107,216,.28); border:2px solid rgba(47,107,216,.85); border-radius:6px; }
+/* 谱面上的对错标记：判过的音在那一格下方打一条 */
+#marks { position:absolute; inset:0; pointer-events:none; z-index:8; }
+.mk { position:absolute; height:5px; border-radius:3px; }
+.mk.ok { background:#1a8a4a; }
+.mk.bad { background:#cc4444; height:7px; }
+.mk.unclear { background:#b9b3a9; height:3px; }
+
+/* 作业条：一行装下"下一个音 / 计数"，尽量不抢谱面的空间 */
+.hud { display:flex; align-items:center; gap:10px; padding:8px 4px 6px; flex-wrap:wrap; font-size:13px; color:var(--dim); }
+.hud b { color:var(--ink); }
+.hud .nx b { color:var(--now); font-size:19px; letter-spacing:.4px; }
+#verdict { padding:9px 12px; border-radius:11px; background:var(--card); border:1px solid var(--line);
+  font-size:14px; margin-bottom:6px; }
+#verdict.ok { border-color:var(--ok); color:var(--ok); }
+#verdict.bad { border-color:var(--bad); color:var(--bad); }
+#wrongs { font-size:12.5px; color:var(--bad); white-space:nowrap; overflow-x:auto; min-height:0; padding-bottom:4px; }
+#err { white-space:pre-wrap; font-size:12.5px; color:var(--dim); padding-bottom:6px; }
+#chords { display:none; flex:1 1 auto; min-height:0; overflow:auto; background:var(--card);
+  border:1px solid var(--line); border-radius:14px; padding:10px; }
+#chords .c { display:flex; align-items:center; gap:12px; padding:12px; border:1px solid var(--line);
+  border-radius:12px; margin-bottom:8px; }
+#chords .c.now { border-color:var(--now); background:#eef4ff; }
+#chords .c .nm { font-size:22px; font-weight:700; width:56px; }
+#chords .c .vo { color:var(--dim); font-size:13px; }
+#chords .c .beat { margin-left:auto; letter-spacing:3px; color:var(--dim); font-size:18px; }
+.count { position:fixed; inset:0; display:none; align-items:center; justify-content:center;
+  background:rgba(247,245,241,.75); font-size:22vw; font-weight:800; color:var(--now); z-index:50; pointer-events:none; }
+.count.on { display:flex; }
+@media (max-width:700px) { header h1 { font-size:14px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">跟弹</h1>
+  <button id="play">▶ 试听</button>
+  <button id="mic">🎤 跟弹</button>
+  <button id="gear" title="设置">⚙</button>
+</header>
+
+<div id="settings">
+  <select id="song" aria-label="曲目">
+    <option value="heyjude">Hey Jude（真实谱面）</option>
+    <option value="chords">和弦练习（C–Am–F–G）</option>
+  </select>
+  <select id="track" aria-label="声部"></select>
+  <select id="mode" aria-label="模式">
+    <option value="wait">等我弹</option>
+    <option value="tempo">跟节拍</option>
+  </select>
+  <label>速度 <input id="speed" type="number" min="40" max="200" step="2" value="76"> BPM</label>
+  <button id="loop">循环</button>
+    <!-- 默认**不勾**：外放时手机会把播放的旋律当成本人在弹 —— 判定会把每个音都判"对"。
+         这不是猜，是代码里一直写着的风险（"外放会被麦克风收进去"）；想用就戴耳机再勾。 -->
+    <label><input id="guide" type="checkbox"> 跟弹时播放旋律（必须戴耳机，外放会让判定失真）</label>
+    <label><input id="metro" type="checkbox"> 节拍器（戴耳机，外放会被麦克风收进去）</label>
+  <button id="selftest">自检</button>
+  <button id="saveLog">导出记录</button>
+  <!-- 谱面记错的地方用它：按一下 = 这一格不判、直接到下一个音（顺序对号不会被带偏） -->
+  <button id="skip">跳过这个音</button>
+  <!-- 版本号就放在「导出记录」旁边：手机上出问题时，先看这里对不对得上 -->
+  <span id="ver" style="color:#888"></span>
+  <!-- 对齐结论也放这儿：一眼看出"光标那份谱面清单"和"判定那份时间轴清单"是不是同一个
+       （对不上就会出现"照着光标弹还判错、瞎弹反而对"）。点开导出记录也有同一份数据。 -->
+  <span id="align" style="color:#888;font-variant-numeric:tabular-nums"></span>
+  <!-- 实时电平：排查"放着不动它自己走"用的。看 环境/门限/电平 三个数就够。 -->
+  <span id="lv" style="color:#888;font-variant-numeric:tabular-nums"></span>
+</div>
+
+<main>
+  <div id="scoreWrap"><div id="score"><div id="marks"></div><div id="cursor"></div></div></div>
+  <div id="chords"></div>
+  <div class="hud">
+    <span class="nx" id="next"></span>
+    <span>进度 <b id="pos">0/0</b></span>
+    <span>对 <b id="good">0</b></span>
+    <span>错 <b id="bad">0</b></span>
+    <span>漏 <b id="missed">0</b></span>
+    <span>测不准 <b id="unclear">0</b></span>
+    <span id="tune" style="color:var(--bad)"></span>
+    <span>听到 <b id="heard">—</b></span>
+  </div>
+  <div id="verdict">点「试听」听一遍，再点「跟弹」对着麦克风弹。</div>
+  <div id="wrongs"></div>
+  <div id="err"></div>
+  <div id="count" class="count"></div>
+</main>
+
+<script src="./vendor/alphaTab.min.js"></script>
+<script type="module" src="./js/follow-score.js"></script>
+<script>
+  // 设置面板显隐
+  document.getElementById('gear').onclick = () => {
+    document.getElementById('settings').classList.toggle('open');
+  };
+</script>
+</body>
+</html>
