@@ -147,22 +147,6 @@ const WINDOWS = {
   // 产品里真正用来判定的那扇窗：判定发生在"记录的起音时刻 + 90ms"，
   // 取的是那一刻往回 170ms —— 记录的起音时刻比真拨弦晚约 15ms，所以等于 [真起音-65ms, +105ms]。
   'prod 判定窗[真起音-65,+105]': (A, at) => ({ mags: spectrumOf(seg(A, at - 65 / 1000, 8192)), N: 8192 }),
-  // 产品里另一份：起音那一刻的快照，按"这一帧比上一帧涨了几倍"逐频点加权
-  // （还在衰减的旧谐波 rise<1 → 压成 0）。这就是"只看新拨进来的那部分"。
-  'rise 起音快照(抬头加权)': (A, at) => {
-    const N = 8192, RISE_N = 2048, t = at + 18 / 1000;     // 记录时刻≈真起音+18ms
-    const snap = spectrumOf(seg(A, t - N / SR, N));
-    const now2 = spectrumOf(seg(A, t - RISE_N / SR, RISE_N));
-    const prev2 = spectrumOf(seg(A, t - 16 / 1000 - RISE_N / SR, RISE_N));
-    const k = Math.round((SR / N) / (SR / RISE_N));
-    const out = new Float32Array(snap.length);
-    for (let i = 0; i < snap.length; i++) {
-      const ri = i * k;
-      const r = ri < now2.length && prev2[ri] > 1e-12 ? now2[ri] / prev2[ri] : 1;
-      out[i] = snap[i] * Math.max(0, Math.min(3, r - 1));
-    }
-    return { mags: out, N };
-  },
 };
 const METHODS = {
   '① 产品现状 Near(±80)+75音分': (mags, N, exp) => {

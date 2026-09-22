@@ -11,7 +11,7 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0922-2300';
+const BUILD = '0922-2210';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
@@ -854,14 +854,7 @@ function micTick() {
   const prevLv = levelHist.length ? levelHist[levelHist.length - 1] : 0;
   // 1.4 倍：拨弦那一帧通常涨 1.5~50 倍；连着两个快音时第二个音只在第一个音的
   // 余响上再抬一截（实测 1.67 倍），门限设 1.7 会把这种**真拨弦**挡掉。
-  const sharpEnough = lv > prevLv * 1.4 || prevLv < Math.max(0.0012, floor * 1.5)
-    // ⚠ 同一根弦同一个音**再拨一下**时，上一根弦还在响，电平只抬 1.1~1.3 倍（实测 3.584s：
-    // 0.1693 / 0.1543 = 1.10）—— 用 1.4 倍卡会把"连着弹同一个音"的第二下整条丢掉。
-    // 那种音在谱面上很常见（1弦1品 F4 就是 F4 F4 F4 连着来），漏一下之后**下一个音会被
-    // 拿去和 F4 比**，于是用户看到的是"1弦1品总判错"。
-    // 放宽的代价用**高频瞬态**抵：拨片/指甲那一下在 2kHz 以上一定有新的爆发，
-    // 而余响只会衰减、造不出新的高频（实测真拨第二下 高频通量 0.64，余响起伏只有 0.48 且电平不涨）。
-    || ((repeatSame || hfFlux > 0.4) && lv > prevLv * 1.03);
+  const sharpEnough = lv > prevLv * 1.4 || prevLv < Math.max(0.0012, floor * 1.5);
   // ③ 换音：最近两帧的主峰都落在"和 3 帧前不同的音"上（差半个半音以上）
   let pitchJump = false;
   if (domHist.length >= 5) {
@@ -887,14 +880,6 @@ function micTick() {
         // 只有延音在响时，高频是衰减的、电平也在往下走，两条都不成立，就不会被当成新的一下。
         || (repeatSame && hfFlux > 0.10 && lv > lagged * 1.15))
     && now - lastOnsetMs > Math.max(90, CFG.minGapMs);
-  // 起音层的逐帧台帐（只在 VC_ONSET_DEBUG=1 时打）：查"这一段为什么没被当起音"用
-  if (globalThis.__vcOnsetDebug && lv > 0.02) {
-    console.log(`[onset] t=${(now / 1000).toFixed(3)} 电平=${lv.toFixed(4)} 上帧=${prevLv.toFixed(4)}`
-      + ` 滞后=${lagged.toFixed(4)} 门限=${strongGate.toFixed(4)} 陡=${sharpEnough ? 'y' : 'n'}`
-      + ` 形状=${shapeFlux.toFixed(3)} 通量=${flux.toFixed(3)} 高频=${hfFlux.toFixed(3)}`
-      + ` 上升=${(lv / (lagged + 1e-9)).toFixed(2)} 相位=${phase} 冷却=${now >= refractoryUntilMs ? 'y' : 'n'}`
-      + ` → ${onset ? '起音' : ''}`);
-  }
   // ③ **撤掉**"主峰跳变就算新起音"这条。
   // 它本来是想解决"快音的第二下"（换弦换品时电平还没掉、音高先跳），但代价是：
   // 一个长音在响的时候，主峰会随衰减在基频和某个谐波之间来回晃 —— 每晃一下就多算一个音，
@@ -1459,11 +1444,8 @@ function advanceNote() {
   const gapMs = (nextN && prevNote) ? Math.max(0, (nextN.t - prevNote.t) * 1000) : 200;
   // 连续相同音时把间隔再压缩（否则第二下会被当成余响忽略掉）
   const same = !!(nextN && prevNote && nextN.midi === prevNote.midi);
-  // ⚠ 冷却期的起点必须是**拨弦那一刻**（lastOnsetMs），不能是"判定这一刻"——
-  // 判定发生在起音后约 90ms，从那一刻再往后推 160ms，等于每次拨弦后有 ~250ms 不认新起音；
-  // 而连着弹同一个音的快音第二下只隔 200~270ms，正好被吞掉（漏一下以后整条错位）。
-  const guardMs = Math.min(160, Math.max(same ? 55 : 70, gapMs * (same ? 0.35 : 0.55)));
-  refractoryUntilMs = Math.max(refractoryUntilMs, lastOnsetMs + guardMs);
+  refractoryUntilMs = performance.now()
+    + Math.min(160, Math.max(same ? 55 : 70, gapMs * (same ? 0.35 : 0.55)));
   // 不设延音期：谱面的延音只是"这个音响得久"，不代表你要再弹一次，
   // 也不代表接下来不能判定。判定只跟"你拨了几下"有关。
   noteIdx++;

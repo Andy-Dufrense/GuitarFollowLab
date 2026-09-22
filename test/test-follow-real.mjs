@@ -53,17 +53,11 @@ globalThis.cancelAnimationFrame = () => { pending = null; };
 // 用真的谱面时间轴；VC_SHIFT 用来整体平移（检验"是不是差一个音"的假设）
 const SHIFT = Number(process.env.VC_SHIFT || 0);
 const ALL_NOTES = JSON.parse(fs.readFileSync('frontend/data/hey_jude.json', 'utf8')).notes.slice(0, 60);
-// VC_TIMELINE=<path>：用自定义的音符表跑（离线复现"某几个音"的场景用，比如 1弦1品 F4 连弹）
-const TIMELINE = process.env.VC_TIMELINE
-  ? JSON.parse(fs.readFileSync(process.env.VC_TIMELINE, 'utf8')) : null;
 globalThis.fetch = async (u) => {
   const isChord = String(u).includes('chord');
   const payload = isChord
     ? JSON.parse(fs.readFileSync('frontend/data/chord_practice.json', 'utf8'))
-    : {
-      meta: TIMELINE ? TIMELINE.meta : { title: 'Hey Jude', tempo: 76 },
-      notes: TIMELINE ? TIMELINE.notes : ALL_NOTES.slice(SHIFT, SHIFT + 55),
-    };
+    : { meta: { title: 'Hey Jude', tempo: 76 }, notes: ALL_NOTES.slice(SHIFT, SHIFT + 55) };
   return { ok: true, status: 200, json: async () => payload, blob: async () => ({ size: 1 }) };
 };
 
@@ -117,7 +111,6 @@ globalThis.alphaTab = { AlphaTabApi: FakeApi, version: 'stub' };
 
 await import('../frontend/js/follow-score.js');
 if (process.env.VC_DEBUG) globalThis.__vcDebug = true;
-if (process.env.VC_ONSET_DEBUG) globalThis.__vcOnsetDebug = true;
 globalThis.__vcNotes = [];
 globalThis.__onsetLog = [];
 globalThis.__vcSession = [];
