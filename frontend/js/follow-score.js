@@ -11,7 +11,7 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0923-1030';
+const BUILD = '0923-1100';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
@@ -1186,7 +1186,12 @@ function micTickBody() {
       //   ② 漏弹一格之后"全体错位一位"的老毛病。
       // 只在这三个条件同时成立时才跳：量到的音 == 下一个音、当前音明显不像（失配 >200）、
       // 且下一个音自己明显更贴（失配好 60 以上）。这样不会把正常演奏判成"跳音"。
-      if (modeKind !== 'tempo' && candMatch && candBest && candSelf && notes[best + 1]
+      // ⚠ 只在**快音段落**才允许"跳过去一个音"：
+      // 用户口径（2026-09-22）：慢的地方我把 2 品弹成 3 品，那就是我弹错了，不许系统替我解释成
+      // "你跳过了一个音"。快音段落才可能出现"漏弹一格 → 后面全体错位"，那里才用得着它。
+      const ioiHere = (notes[best] && notes[best + 1]) ? (notes[best + 1].t - notes[best].t) * 1000 : 999;
+      const fastPair = ioiHere <= 260;
+      if (modeKind !== 'tempo' && fastPair && candMatch && candBest && candSelf && notes[best + 1]
         && candBest.midi === notes[best + 1].midi && candSelf.mismatch > 200) {
         const r2 = judgeNote({ spec, sampleRate: specRate, fftSize: specN, expectedMidi: notes[best + 1].midi + pitchShift() });
         if (r2.self && r2.self.mismatch + 60 < candSelf.mismatch) {
