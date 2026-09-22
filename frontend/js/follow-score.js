@@ -11,7 +11,7 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0923-0210';
+const BUILD = '0923-0300';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
@@ -577,6 +577,7 @@ $('speed').onchange = () => {
 
 let micTimer = 0;
 let notes = null;          // Hey Jude 谱面音符（时间轴）
+let notesMeta = null;      // 谱面 meta（含 timeSignatures —— 节拍器按小节/拍号走要用）
 let noteIdx = 0;
 let phase = 'idle';        // idle | countin | waiting | settling
 let onsetAtMs = 0;
@@ -757,16 +758,62 @@ function tempoClickAt(delaySec, accent) {
 // 把"接下来 200ms 内该响的提示音"预约出去（跟节拍时用；每个音的起点响一下 = 光标走到哪响到哪）
 function scheduleTempoClicks(tMs) {
   if (!($('metro') && $('metro').checked)) return;
-  while (tempoClicks.length && tempoClicks[0] < tMs - 80) tempoClicks.shift();   // 过期的丢掉
-  while (tempoClicks.length && tempoClicks[0] <= tMs + 200) {
-    const at = tempoClicks.shift();
-    tempoClickAt((at - tMs) / 1000, false);
+  const off = tempoOriginMs || 0;
+  while (tempoBeatIdx < tempoBeats.length && tempoBeats[tempoBeatIdx].ms + off < tMs - 80) tempoBeatIdx++;
+  while (tempoBeatIdx < tempoBeats.length && tempoBeats[tempoBeatIdx].ms + off <= tMs + 200) {
+    const b = tempoBeats[tempoBeatIdx++];
+    const accent = b.beat === 0;
+    const delay = (b.ms + off - tMs) / 1000;
+    tempoClickAt(delay, accent);
+    // 闪灯也按同一个时刻延后（用相对 delay，和提示音同源）
+    setTimeout(() => flashBeat(accent), Math.max(0, delay * 1000));
   }
 }
+// ── 节拍器：按**小节/拍号**走（不是每个音响一下）────────────────────────────
+// 拍点时刻 = 小节起点 + k × 一拍；小节起点由拍号累加算出来（和谱面时间轴同一个 scale）。
+// 强拍（每小节第 1 拍）音高一点、并让光标闪一下 —— 这就是"节拍器跟着光标闪"。
+function buildBeatGrid() {
+  if (!notes || !notes.length) return [];
+  const sigs = (notesMeta && notesMeta.timeSignatures) || [];
+  const perOf = (m) => {
+    const s = sigs.find((x) => x.measure === m + 1);
+    const n = s ? Number(String(s.sig).split('/')[0]) : 4;
+    return n > 0 ? n : 4;
+  };
+  const measures = Math.max(...notes.map((n) => n.measure || 0)) + 1;
+  const beat = tempoBeatMs();
+  const out = [];
+  let ms = 0;
+  for (let m = 0; m < measures; m++) {
+    const per = perOf(m);
+    for (let b = 0; b < per; b++) out.push({ ms: ms + b * beat, measure: m, beat: b });
+    ms += per * beat;
+  }
+  return out;
+}
+let tempoBeats = [];       // 上面的拍点表（相对时间轴 0）
+let tempoBeatIdx = 0;      // 已经排到第几个拍点
 function rebuildTempoClicks() {
-  if (!notes) return;
-  const startTo = tempoPickupCount();          // 起拍音不响提示音（它是"起手"，由用户自己定）
-  tempoClicks = notes.slice(startTo).map((_, k) => tempoAt(k + startTo));
+  tempoBeats = buildBeatGrid();
+  tempoBeatIdx = 0;
+}
+// 视觉：拍点闪一下（跟光标同一时刻 —— 预约提示音和闪灯用的是同一个"该响时刻"）
+function flashBeat(accent) {
+  const el = $('beat');
+  if (el) {
+    el.textContent = accent ? '●' : '○';
+    el.style.color = accent ? '#2f6bd8' : '#8b857c';
+    setTimeout(() => { if (el.textContent === (accent ? '●' : '○')) el.textContent = '·'; }, 130);
+  }
+  const cur = $('cursor');
+  if (cur) {
+    cur.style.borderColor = accent ? 'rgba(47,107,216,1)' : 'rgba(47,107,216,.85)';
+    cur.style.background = accent ? 'rgba(47,107,216,.45)' : 'rgba(47,107,216,.28)';
+    setTimeout(() => {
+      cur.style.borderColor = 'rgba(47,107,216,.85)';
+      cur.style.background = 'rgba(47,107,216,.28)';
+    }, 120);
+  }
 }
 
 // ── 实时诊断：每判一个音/漏一个音就往页面上写一行 ────────────────────────────
@@ -863,7 +910,11 @@ function tempoTick(nowMs) {
 
 async function loadNotes() {
   // 全部音符（原来只取前 60 个，所以光标走到一半多就"结束"了）
-  if (!notes) notes = (await (await fetch('./data/hey_jude.json')).json()).notes;
+  if (!notes) {
+    const data = await (await fetch('./data/hey_jude.json')).json();
+    notes = data.notes;
+    notesMeta = data;            // 小节/拍号/速度都在这儿（节拍器要用）
+  }
   return notes;
 }
 
@@ -1256,6 +1307,35 @@ function micTick() {
         noteIdx = k;             // 只是把"当前音"对齐到这一下；光标仍由时钟驱动
         // 偏差要跟"带原点的时间轴"比（起手对齐之后，第一个音的偏差应该≈0）
         devMs = elapsed - tempoAt(k);
+        // ── 快速段落：用"这一下最像哪个音"来定归属（时间 + 音高）──────────────
+        // 只按时间最近对号，到 16 分音符那种地方**差一位就整段判错**
+        // （用户实测"连续的快节奏音符会判定不过来、导致全错"）。
+        // 这里在附近还没判的 ±3 个音里各量一次"自己贴不贴"，挑最像的那个；
+        // 同一个音高反复出现时（F4 F4 F4）时间近的优先（损失里带了时间差）。
+        try {
+          const N = 8192;
+          const srNow = (audio.getCtx() && audio.getCtx().sampleRate) || 48000;
+          const specE = spectrumOf(buf.subarray(Math.max(0, buf.length - N)));
+          const c0 = Math.max(0, k - 3), c1 = Math.min(notes.length - 1, k + 3);
+          let pick = k, bestLoss = Infinity;
+          for (let j = c0; j <= c1; j++) {
+            if (tempoState[j]) continue;
+            const d = Math.abs(elapsed - tempoAt(j));
+            const ioiJ = notes[j + 1] ? Math.max(60, (notes[j + 1].t - notes[j].t) * 1000) : 400;
+            if (d > Math.max(tempoTol(j), ioiJ * 1.2)) continue;
+            const r = matchNoteByCandidates(specE, srNow, N, notes[j].midi);
+            const self = r.ranked.find((x) => x.offset === 0);
+            if (!self || !(self.mismatch < 250)) continue;
+            const loss = self.mismatch + d / 2;
+            if (loss < bestLoss) { bestLoss = loss; pick = j; }
+          }
+          if (pick !== k) {
+            best = pick;
+            noteIdx = pick;
+            devMs = elapsed - tempoAt(pick);
+            diag(`（快音对号：这一下最像第${pick + 1}个音 ${midiToNameOf(notes[pick].midi)}）`);
+          }
+        } catch (e) { /* 量不出来就按时间对号 */ }
       }
       if (!notes[best]) { stopMic(); return; }
       const exp = notes[best];
