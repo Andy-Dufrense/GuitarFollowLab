@@ -11,7 +11,7 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0923-0900';
+const BUILD = '0923-0930';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
@@ -1382,8 +1382,11 @@ function micTickBody() {
       // 所以：**电平低于 0.06 的音**，如果精确读数说它就在谱面这个音上（±45 音分内），
       // 就不让"候选重排"把它判成错 —— 低信噪比下候选重排本来就没有分辨力。
       // 响的音（≥0.06）不受影响：±1/±2 弹错的两向验收都在那个区间，检出不能松。
+      // ⚠ 这里必须用 estP.cents（上面已经算好），**不能**用下面的别名 centsP ——
+      // 那个 const 声明在几行之后，在声明前访问会抛 ReferenceError（暂时性死区）。
+      // 2026-09-22 就是这么把主循环弄死的：音够响时 && 短路不发作，1 弦衰减到 0.06 以下才炸。
       const quiet = lv < 0.06;
-      const quietOk = quiet && Math.abs(centsP) <= 45;
+      const quietOk = quiet && Math.abs(estP.cents) <= 45;
       const pass = JUDGE_CAND && candMatch ? (passCand || quietOk) : (reliable && Math.abs(centsFixed) <= 75);
       // 判"错"之后要说出**用户弹的是哪个音**。问题：上面那把尺子是在"谱面那个音"的
       // 谐波位置上找峰的（±60 音分），真弹成隔壁半音时真谐波落在范围外，读数会被拉回来
