@@ -3,9 +3,9 @@
 // 只管"把状态画出来"，不掺判定逻辑，也不碰音频采集。
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { midiToName, midiToHz } from './engine/dsp.js?v=0924-1925';
+import { midiToName, midiToHz } from './engine/dsp.js?v=0924-2015';
 import { MODES } from './exercises.js';
-import { CFG, FLASH_MS } from './engine/config.js?v=0924-1925';
+import { CFG, FLASH_MS } from './engine/config.js?v=0924-2015';
 import { S, mode, step, newRun } from './state.js';
 import { permissionState } from './audio.js';
 

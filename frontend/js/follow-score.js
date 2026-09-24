@@ -11,11 +11,11 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0924-1925';
+const BUILD = '0924-2015';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
-import { rms, spectrumOf } from './engine/dsp.js?v=0924-1925';
+import { rms, spectrumOf } from './engine/dsp.js?v=0924-2015';
 import * as audio from './audio.js';
 import {
   track, fluxRelOf, resetAnalysis, novelSpectrum, verifyExpectedNote, chordOutsiders,
@@ -24,12 +24,12 @@ import {
   lowBandRiseOf,
   shapeFluxOf, harmonicity, spectralSparsity, spectralFlatness, spectralPeakiness, f0SeriesFromDiff,
   dominantF0InBand, strongestF0InBand, diffMags, matchNoteByCandidates, readPluckF0,
-} from './engine/analysis.js?v=0924-1925';
-import { CFG, FLUX_N } from './engine/config.js?v=0924-1925';
+} from './engine/analysis.js?v=0924-2015';
+import { CFG, FLUX_N } from './engine/config.js?v=0924-2015';
 import { createMetro } from './metro-core.js';
 // 分层：检测能力（起音层 / 判定层）各自一个文件，阈值也都收在那两个文件里。
-import { decideOnset, ONSET } from './engine/onset.js?v=0924-1925';
-import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js?v=0924-1925';
+import { decideOnset, ONSET } from './engine/onset.js?v=0924-2015';
+import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js?v=0924-2015';
 // 光标层：谱面格子 ↔ 判定清单 的对号（纯函数，单独一个文件）
 import { collectScoreSlots, mapSequenceToSlots } from './app/cursor.js';
 // 跟节拍层（状态机 + 拍点 + 提示音）—— 这一层只通过回调跟页面打交道
@@ -68,13 +68,15 @@ function setVerdict(text, kind) {
 //   ① 把 .gp* 放进 frontend/data/；
 //   ② 跑一条命令生成时间轴：backend\tools\gp_timeline.py <file> --json frontend\data\<name>.json
 //   ③ 在下面这张表里加一行（gp / json / title），再在 index.html 的曲目下拉里加一个同名 option。
+// ⚠ 谱面/时间轴地址都带 `?v=${BUILD}`：跟 JS 模块一个道理 —— 谱子改了以后，
+//   手机不会拿缓存里的旧谱面（2026-09-24 改谱子时踩到过：谱面改了但页面还是旧的那张）。
 const SCORES = {
-  heyjude: { gp: './data/hey_jude.gp3', json: './data/hey_jude.json', title: 'Hey Jude' },
-  jasmine: { gp: './data/chinese-jasmine.gp4', json: './data/chinese-jasmine.json', title: '茉莉花（Moo Li Wha）' },
+  heyjude: { gp: `./data/hey_jude.gp3?v=${BUILD}`, json: `./data/hey_jude.json?v=${BUILD}`, title: 'Hey Jude' },
+  jasmine: { gp: `./data/chinese-jasmine.gp4?v=${BUILD}`, json: `./data/chinese-jasmine.json?v=${BUILD}`, title: '茉莉花（Moo Li Wha）' },
   // 2026-09-24：C-Am-F-G × T3231323 的**真实谱面**。这个 .gp 是本项目自己生成的
   // （alphaTab 1.8.4 的 Gp7Exporter，不需要 Guitar Pro），和判定清单 chord_arp.json
   // **同一份数据** → 谱面拍点 32 = 判定 32，天然对齐（就是原来"117 vs 118"那个坑的反面）。
-  chordarp: { gp: './data/chord_arp.gp', json: './data/chord_arp.json', title: 'C-Am-F-G · T3231323（真实谱面）' },
+  chordarp: { gp: `./data/chord_arp.gp?v=${BUILD}`, json: `./data/chord_arp.json?v=${BUILD}`, title: 'C-Am-F-G · T3231323（真实谱面）' },
 };
 const scoreOf = (kind) => SCORES[kind] || null;
 

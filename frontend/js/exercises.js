@@ -8,7 +8,7 @@
 // T3231323 的读法：T = 拇指，弹根音所在的那根弦；3/2/1 = 第三弦/第二弦/第一弦。
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { OPEN_STRING_MIDI, midiToHz, midiToName, CHORD_LIB, chordVoicing } from './engine/data.js?v=0924-1925';
+import { OPEN_STRING_MIDI, midiToHz, midiToName, CHORD_LIB, chordVoicing } from './engine/data.js?v=0924-2015';
 
 export const LIVE_CHORDS = ['Em', 'Am', 'C', 'G', 'D', 'Dm', 'G5'];
 
