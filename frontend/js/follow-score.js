@@ -11,11 +11,11 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0924-1725';
+const BUILD = '0924-1925';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
-import { rms, spectrumOf } from './engine/dsp.js?v=0924-1725';
+import { rms, spectrumOf } from './engine/dsp.js?v=0924-1925';
 import * as audio from './audio.js';
 import {
   track, fluxRelOf, resetAnalysis, novelSpectrum, verifyExpectedNote, chordOutsiders,
@@ -24,12 +24,12 @@ import {
   lowBandRiseOf,
   shapeFluxOf, harmonicity, spectralSparsity, spectralFlatness, spectralPeakiness, f0SeriesFromDiff,
   dominantF0InBand, strongestF0InBand, diffMags, matchNoteByCandidates, readPluckF0,
-} from './engine/analysis.js?v=0924-1725';
-import { CFG, FLUX_N } from './engine/config.js?v=0924-1725';
+} from './engine/analysis.js?v=0924-1925';
+import { CFG, FLUX_N } from './engine/config.js?v=0924-1925';
 import { createMetro } from './metro-core.js';
 // 分层：检测能力（起音层 / 判定层）各自一个文件，阈值也都收在那两个文件里。
-import { decideOnset, ONSET } from './engine/onset.js?v=0924-1725';
-import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js?v=0924-1725';
+import { decideOnset, ONSET } from './engine/onset.js?v=0924-1925';
+import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js?v=0924-1925';
 // 光标层：谱面格子 ↔ 判定清单 的对号（纯函数，单独一个文件）
 import { collectScoreSlots, mapSequenceToSlots } from './app/cursor.js';
 // 跟节拍层（状态机 + 拍点 + 提示音）—— 这一层只通过回调跟页面打交道
@@ -71,6 +71,10 @@ function setVerdict(text, kind) {
 const SCORES = {
   heyjude: { gp: './data/hey_jude.gp3', json: './data/hey_jude.json', title: 'Hey Jude' },
   jasmine: { gp: './data/chinese-jasmine.gp4', json: './data/chinese-jasmine.json', title: '茉莉花（Moo Li Wha）' },
+  // 2026-09-24：C-Am-F-G × T3231323 的**真实谱面**。这个 .gp 是本项目自己生成的
+  // （alphaTab 1.8.4 的 Gp7Exporter，不需要 Guitar Pro），和判定清单 chord_arp.json
+  // **同一份数据** → 谱面拍点 32 = 判定 32，天然对齐（就是原来"117 vs 118"那个坑的反面）。
+  chordarp: { gp: './data/chord_arp.gp', json: './data/chord_arp.json', title: 'C-Am-F-G · T3231323（真实谱面）' },
 };
 const scoreOf = (kind) => SCORES[kind] || null;
 

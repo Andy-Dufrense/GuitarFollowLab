@@ -7,15 +7,15 @@
 //   · 听不清：先补测 3 次，再考虑差分兜底，最后才说"没听清"
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { matchChordIn, observedPitchClasses, midiToName, midiToHz, spectrumOf } from './engine/dsp.js?v=0924-1725';
+import { matchChordIn, observedPitchClasses, midiToName, midiToHz, spectrumOf } from './engine/dsp.js?v=0924-1925';
 import { LIVE_CHORDS } from './exercises.js';
-import { CFG, CHORD_SETTLE_MS, FLUX_N } from './engine/config.js?v=0924-1725';
+import { CFG, CHORD_SETTLE_MS, FLUX_N } from './engine/config.js?v=0924-1925';
 import { S, step } from './state.js';
 import { getBuffer, getDecim, getRate, getCtx } from './audio.js';
 import {
   analyze, novelSpectrum, matchNoteByCandidates, rotateChroma,
   verifyExpectedNote, getBackground, RISE_WINDOW,
-} from './engine/analysis.js?v=0924-1725';
+} from './engine/analysis.js?v=0924-1925';
 import {
   $, setVerdict, restoreVerdictAfter, bump, logResult, paintHeard,
   renderStep, renderDots, flashTarget,

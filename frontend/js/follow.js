@@ -3,14 +3,14 @@
 // 判定用的是"已知答案"那条路：起音当场快照（S 里的抬头率）→ 谱上这个音出现了没有。
 // 这里刻意不复用练习模式那套"弹错就不往下走"的状态机 —— 跟弹不能停。
 
-import { rms, midiToName } from './engine/dsp.js?v=0924-1725';
+import { rms, midiToName } from './engine/dsp.js?v=0924-1925';
 import * as audio from './audio.js';
 import {
   track, fluxRelOf, resetAnalysis, novelSpectrum, matchNoteByCandidates,
   verifyExpectedNote, getLastMagsFull, getFluxSpec, getBeforeFluxSpec, RISE_WINDOW,
   chordOutsiders,
-} from './engine/analysis.js?v=0924-1725';
-import { CFG, FLUX_N } from './engine/config.js?v=0924-1725';
+} from './engine/analysis.js?v=0924-1925';
+import { CFG, FLUX_N } from './engine/config.js?v=0924-1925';
 
 const $ = (id) => document.getElementById(id);
 // 数据集由 ?song=chords 选择：默认是 Hey Jude 旋律谱，chords 是示范和弦谱。

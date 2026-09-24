@@ -32,7 +32,9 @@ export function collectScoreSlots(s, trackIndex = 0, opts = {}) {
           out.push({
             beat, start, t: (start / 960) * (60 / tempo),
             // realValue = 算上调弦的真正音高；用它 + 品来对号，跟弦号怎么编号无关
-            midi: note.realValue, string: note.string, fret: note.value,
+            // ⚠ 品的字段名按格式不一样：GP3/GP4 导入写在 `value`，**GP7 导入写在 `fret`**
+            //   （2026-09-24 加 .gp 谱子时实测：只读 value 的话 GP7 谱面 32 格全部 fret=null → 对号全报对不上）
+            midi: note.realValue, string: note.string, fret: (note.fret != null ? note.fret : note.value),
           });
         }
       }
