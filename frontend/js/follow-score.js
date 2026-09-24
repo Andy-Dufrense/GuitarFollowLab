@@ -11,23 +11,25 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0923-1230';
+const BUILD = '0924-1725';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
-import { rms, spectrumOf } from './engine/dsp.js';
+import { rms, spectrumOf } from './engine/dsp.js?v=0924-1725';
 import * as audio from './audio.js';
 import {
   track, fluxRelOf, resetAnalysis, novelSpectrum, verifyExpectedNote, chordOutsiders,
   getFluxSpec, getBeforeFluxSpec, estimateF0Near, estimateF0ByPeaks, hfFluxRelOf,
-  shapeFluxOf, harmonicity, spectralSparsity, spectralFlatness, spectralPeakiness,
-  dominantF0InBand, strongestF0InBand, diffMags, matchNoteByCandidates,
-} from './engine/analysis.js';
-import { CFG, FLUX_N } from './engine/config.js';
+  hfBandRiseOf,
+  lowBandRiseOf,
+  shapeFluxOf, harmonicity, spectralSparsity, spectralFlatness, spectralPeakiness, f0SeriesFromDiff,
+  dominantF0InBand, strongestF0InBand, diffMags, matchNoteByCandidates, readPluckF0,
+} from './engine/analysis.js?v=0924-1725';
+import { CFG, FLUX_N } from './engine/config.js?v=0924-1725';
 import { createMetro } from './metro-core.js';
 // 分层：检测能力（起音层 / 判定层）各自一个文件，阈值也都收在那两个文件里。
-import { decideOnset } from './engine/onset.js';
-import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js';
+import { decideOnset, ONSET } from './engine/onset.js?v=0924-1725';
+import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js?v=0924-1725';
 // 光标层：谱面格子 ↔ 判定清单 的对号（纯函数，单独一个文件）
 import { collectScoreSlots, mapSequenceToSlots } from './app/cursor.js';
 // 跟节拍层（状态机 + 拍点 + 提示音）—— 这一层只通过回调跟页面打交道
@@ -40,6 +42,7 @@ let score = null;
 let songKind = 'heyjude';
 let chords = null;         // 和弦练习的数据
 let chordIdx = -1;
+let chordPick = -1;        // 用户点过的起始和弦（-1 = 没点过 → 从头开始）
 let beatTimer = 0;
 let beat = 0;
 let userBpm = 76;
@@ -60,11 +63,22 @@ function setVerdict(text, kind) {
   $('verdict').className = kind || '';
 }
 
+// ── 真实谱面（.gp*）的统一登记表（2026-09-23）──────────────────────────────
+// 以后接新谱只做三件事，不用改代码：
+//   ① 把 .gp* 放进 frontend/data/；
+//   ② 跑一条命令生成时间轴：backend\tools\gp_timeline.py <file> --json frontend\data\<name>.json
+//   ③ 在下面这张表里加一行（gp / json / title），再在 index.html 的曲目下拉里加一个同名 option。
+const SCORES = {
+  heyjude: { gp: './data/hey_jude.gp3', json: './data/hey_jude.json', title: 'Hey Jude' },
+  jasmine: { gp: './data/chinese-jasmine.gp4', json: './data/chinese-jasmine.json', title: '茉莉花（Moo Li Wha）' },
+};
+const scoreOf = (kind) => SCORES[kind] || null;
+
 // ── alphaTab 部分 ────────────────────────────────────────────────────────────
 function initAlphaTab() {
   if (api || !window.alphaTab) return api;
   api = new alphaTab.AlphaTabApi($('score'), {
-    file: './data/hey_jude.gp3',
+    file: (scoreOf(songKind) && scoreOf(songKind).gp) || './data/hey_jude.gp3',
     core: { fontDirectory: './vendor/font/' },   // 字体在本地（jsdelivr 被挡）
     display: {
       // 谱面一律用整页折行（page）：一行摆若干小节，摆不下换下一行，纵向滚动 ——
@@ -101,6 +115,18 @@ function initAlphaTab() {
     fillTracks(s);
     buildTickMap(s);
   });
+  // ⚠ 光标必须等**渲染完成**之后再摆一次（2026-09-23，用户报"切到茉莉花再切回来，两边都没光标"）：
+  //   buildTickMap 在 scoreLoaded 里跑，那时 alphaTab 往往还没排完版，
+  //   highlightCurrent() 去 renderer.boundsLookup 取坐标会取不到 → 光标画不出来；
+  //   而切过一次曲子之后这个时机更差（旧实例销毁、新实例刚建），于是两边都没光标。
+  //   这里在每帧渲染结束时补摆一次：映射重算 + 光标重画，位置取不到就下次渲染再试。
+  if (api.renderFinished) {
+    api.renderFinished.on(() => {
+      if (!score) return;
+      try { buildTickMap(score, Number($('track') && $('track').value) || 0); } catch (e) {}
+      try { highlightCurrent(); } catch (e) {}
+    });
+  }
   // 按钮文字跟着播放器的真实状态走（这是"要点两次"的根因：点完立刻读状态还没更新）
   api.playerStateChanged.on((e) => {
     const playing = e && e.state === 1;
@@ -229,8 +255,18 @@ function markNote(idx, kind) {
     if (!b || b.w == null) return;
     const el = document.createElement('div');
     el.className = 'mk ' + kind;
-    el.style.left = `${Math.round(b.x)}px`;
-    el.style.top = `${Math.round(b.y + b.h - 2)}px`;
+    // 同理：#marks 也挂到 #scoreWrap 上了，要把 #score 的偏移补上（见 highlightCurrent）
+    let mkOffX = 0, mkOffY = 0;
+    try {
+      const sEl = document.getElementById('score'), wEl = document.getElementById('scoreWrap');
+      if (sEl && wEl && sEl.getBoundingClientRect && wEl.getBoundingClientRect) {
+        const sr = sEl.getBoundingClientRect(), wr = wEl.getBoundingClientRect();
+        mkOffX = sr.left - wr.left + wEl.scrollLeft;
+        mkOffY = sr.top - wr.top + wEl.scrollTop;
+      }
+    } catch (e) { mkOffX = 0; mkOffY = 0; }
+    el.style.left = `${Math.round(b.x + mkOffX)}px`;
+    el.style.top = `${Math.round(b.y + b.h - 2 + mkOffY)}px`;
     el.style.width = `${Math.max(6, Math.round(b.w))}px`;
     box.appendChild(el);
   } catch (e) { /* 定位失败就不标，不影响判定 */ }
@@ -242,6 +278,18 @@ function highlightCurrent(index = noteIdx) {
   const box = document.getElementById('cursor');
   const idx = Math.max(0, Math.min(index, (noteBeats || []).length - 1));
   const beat = noteBeats[idx];
+  // 光标/标记现在挂在 #scoreWrap 上（不放在 #score 里，免得被 alphaTab 渲染时删掉），
+  // 而 alphaTab 给的坐标是**相对它自己的容器**的，所以要把两者的偏移补上。
+  const scoreEl = document.getElementById('score');
+  const wrapEl = document.getElementById('scoreWrap');
+  let offX = 0, offY = 0;
+  try {
+    if (scoreEl && wrapEl && scoreEl.getBoundingClientRect && wrapEl.getBoundingClientRect) {
+      const sr = scoreEl.getBoundingClientRect(), wr = wrapEl.getBoundingClientRect();
+      offX = sr.left - wr.left + wrapEl.scrollLeft;
+      offY = sr.top - wr.top + wrapEl.scrollTop;
+    }
+  } catch (e) { offX = 0; offY = 0; }
   // 这个版本的 alphaTab 没有 highlight API（包里的 highlightBeats 出现 0 次），
   // 但提供了布局坐标（boundsLookup）。所以自己算位置、自己画。
   try {
@@ -252,6 +300,7 @@ function highlightCurrent(index = noteIdx) {
       b = bb && (bb.visualBounds || bb.realBounds || bb);
     }
     if (box && b && b.w != null) {
+      // （下面正常画光标）
       // 光标要盖住**整行**（五线谱 + 六线谱），不能只盖五线谱那一行：
       // 找到这一行所属的 staff system，用它的上下边界当光标高度。
       let y = b.y, h = b.h;
@@ -270,8 +319,8 @@ function highlightCurrent(index = noteIdx) {
         }
       }
       box.style.display = 'block';
-      box.style.left = `${Math.round(b.x)}px`;
-      box.style.top = `${Math.round(y)}px`;
+      box.style.left = `${Math.round(b.x + offX)}px`;
+      box.style.top = `${Math.round(y + offY)}px`;
       box.style.width = `${Math.round(b.w)}px`;
       box.style.height = `${Math.round(h)}px`;
       // 自动翻谱：光标跑出可视区就把谱面滚过去 —— 一路弹到最后，谱子自己往下走。
@@ -289,6 +338,17 @@ function highlightCurrent(index = noteIdx) {
       return;
     }
     if (box) box.style.display = 'none';
+    // ⚠ 光标画不出来时把原因写到页面上（2026-09-23 用户报"一个光标都显示不出来"）：
+    //   光标只有在**能取到这一拍的布局坐标**时才显示；取不到就什么都不显示，用户完全看不到线索。
+    //   这里把三个数写出来：有没有 #cursor 元素、映射表有几条、这一拍取到坐标没有。
+    {
+      const box2 = document.getElementById('cursor');
+      const msg = `光标：元素${box2 ? '有' : '无'}／映射 ${(noteBeats || []).length} 条／`
+        + `这一拍${b ? '有坐标' : (beat ? '取不到坐标' : '没对应上拍点')}`
+        + `（第 ${idx + 1} 个音）`;
+      if ($('align')) $('align').textContent = msg;
+      else err(msg);
+    }
   } catch (e) {
     err('光标定位失败：' + (e.message || e) + '（不影响判定）');
   }
@@ -339,6 +399,19 @@ function renderChords() {
     el.className = 'c';
     el.innerHTML = `<div class="nm">${c.name}</div><div class="vo">${c.voicing}</div>`
       + '<div class="beat">○○○○</div>';
+    // 点和弦卡 = 从这一个和弦开始（试听/跟弹都按这个起点走）。
+    el.onclick = () => {
+      if (beatTimer) {
+        setVerdict('试听进行中：先点「试听」停下，再点你想从哪个和弦开始');
+        return;
+      }
+      chordIdx = i;
+      chordPick = i;               // 记住起点：点「试听」/「跟弹」都从这一个开始
+      paintChords();
+      $('pos').textContent = `${i + 1}/${chords.chords.length}`;
+      setVerdict(`这一遍从 <b>${c.name}</b> 开始（第 ${i + 1} 个和弦）`
+        + ` —— 点「试听」听一遍，或点「跟弹」开始判定`, '');
+    };
     box.appendChild(el);
   });
   $('pos').textContent = `0/${chords.chords.length}`;
@@ -377,15 +450,18 @@ function startChords(withSound = false) {
     setVerdict('和弦谱数据没加载成功，刷新页面再试（data/chord_practice.json）');
     return;
   }
-  chordIdx = 0; beat = 0;
+  // 起点：点过和弦卡就从那一个开始，没点过就从头
+  chordIdx = (chordPick >= 0 ? chordPick : 0);
+  chordPick = -1;                  // 只认这一次点击，下一遍仍旧从头
+  beat = 0;
   paintChords();
-  $('pos').textContent = `1/${chords.chords.length}`;
+  $('pos').textContent = `${chordIdx + 1}/${chords.chords.length}`;
   setVerdict('和弦练习：每个和弦 4 拍，跟着高亮换和弦。弹错不停，标红继续。');
   const ms = (60 / userBpm) * 1000;
   if (withSound) {
     if (!chordCtx) chordCtx = (audio.getCtx && audio.getCtx()) || new (window.AudioContext || window.webkitAudioContext)();
     chordCtx.resume && chordCtx.resume();
-    strumChord(chords.chords[0].midis, chordCtx.currentTime + 0.05);
+    strumChord(chords.chords[chordIdx].midis, chordCtx.currentTime + 0.05);
   }
   beatTimer = setInterval(() => {
     beat++;
@@ -411,6 +487,11 @@ function stopChords() {
 
 // ── 顶部按钮 ─────────────────────────────────────────────────────────────────
 $('song').onchange = async () => {
+  // 切曲目时**先停掉跟弹**：不然麦克风循环还在跑，而判定清单已经换成新的那份
+  // （notes 被清空、noteIdx 归零），两边对不上 —— 手机上表现为"切一下就卡住"。
+  if (micTimer) stopMic();
+  phase = 'idle';
+  techDueMs = 0;
   songKind = $('song').value;
   stopChords();
   if (api && api.playerState === 1) api.playPause();
@@ -437,12 +518,33 @@ $('song').onchange = async () => {
     renderCells();
     $('title').textContent = `C–Am–F–G · T3231323（逐音测试）— v${BUILD}`;
     setVerdict('逐音测试：点「跟弹」，按格子里写的弦/品一个一个弹（蓝色格子 = 当前该弹的）。');
+  } else if (songKind === 'tech') {
+    // 技巧练习：击弦 / 勾弦 / 滑音 —— 拨一下，第二个音靠左手（不用再拨）
+    $('scoreWrap').style.display = 'none';
+    $('chords').style.display = 'none';
+    $('cells').style.display = 'block';
+    $('track').style.display = 'none';
+    $('loop').style.display = 'none';
+    await loadNotes();
+    renderCells();
+    $('title').textContent = `技巧练习 · 击弦/勾弦/滑音（逐音测试）— v${BUILD}`;
+    setVerdict('技巧练习：每一对「拨一下 + 左手技巧」算两个音 —— 拨完不要停，让第二个音响出来。');
   } else {
     $('chords').style.display = 'none';
     $('cells').style.display = 'none';
     $('scoreWrap').style.display = 'block';
     $('track').style.display = '';
     $('loop').style.display = '';
+    // ⚠ 切曲目必须**重建** alphaTab（2026-09-23 用户报"切到茉莉花还显示 Hey Jude"）：
+    //   initAlphaTab() 开头是 `if (api) return api;` —— api 建过一次就返回旧实例，
+    //   谱面永远停在上一首。所以换谱之前先把旧的销毁、api/score 清空。
+    if (api && api.destroy) { try { api.destroy(); } catch (e) {} }
+    api = null; score = null;
+    // 谱面容器也清空 —— 万一 destroy() 不顶用（不同 alphaTab 版本行为不一样），
+    // 至少不会把两首谱画在同一个容器里。
+    if ($('score')) $('score').innerHTML = '';
+    const sc = scoreOf(songKind);
+    if (sc && $('title')) $('title').textContent = sc.title;
     initAlphaTab();
   }
 };
@@ -513,6 +615,9 @@ let notesMeta = null;      // 谱面 meta（含 timeSignatures —— 节拍器�
 let noteIdx = 0;
 let phase = 'idle';        // idle | countin | waiting | settling
 let onsetAtMs = 0;
+// ⚠ 2026-09-24：判定时刻。默认 0 = 老行为（起音后 90ms 定案）；
+//   只有"模糊音"会被推迟到 onsetAtMs + 250（这时判定窗自动变成稳定段）。
+let judgeAtMs = 0;
 let lastOnsetMs = -1e9;   // 忘了声明这个变量 → 模块加载时直接抛错 → 所有按钮都没挂上事件
 let rise = null;
 let levelHist = [];
@@ -524,6 +629,11 @@ let devHistory = [];       // 本次演奏的音准偏差（用来估"这把琴�
 const devByString = {};    // 按弦分别估：吉他每根弦漂移不一样，整体中位数会互相抵消
 const median = (a) => { const s = a.slice().sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
 let wrongList = [];
+// 已经记过错的音（同一个音只记第一次错 —— 停了重弹的那几次不再累加）
+let wrongNoted = new Set();
+let missNoted = -1;            // 这个音已经记过"漏拍/换和弦不流畅"了吗（只记一次）
+let firstJudgeMs = null;       // 跟节拍：第一个被认到的音（总时间的起点）
+let lastJudgeMs = null;        // 跟节拍：最后一个判完的音（总时间的终点）
 // 时间片模型的三个量：当前音自己的时钟起点、它的时间窗长度、以及"这个窗里听没听到"
 let noteClockStart = null;
 let heardInWindow = false;
@@ -538,6 +648,21 @@ let onsetPeakSpec = null;     // 起音那一刻的快照频谱（老判据用�
 //   · 弹错却判对 —— 快照里上一个（弹对的）音还在响，在"期望音附近找峰"永远找得到东西。
 // 减法能把"本来就在响的东西"去掉，剩下的是新拨的那一下。见 analysis.js 的 diffMags。
 let onsetDiffSpec = null;
+// ── 技巧（击弦 / 勾弦 / 滑音）：**一次起音、两个音** ─────────────────────────
+// 用户口径（2026-09-22）："滑音击弦还有勾弦，这里就是要判断两个不同的音但是只有一次起音"。
+// 做法：谱面上第二个音带着 tech 标记时，不要求新的起音 —— 到了那个音该响的时刻，
+// 直接走一次同样的判定（下面 techDueMs 到点就当成"一次起音"）。
+// 时刻按谱面间距算（真机实测：击弦落地约 170ms、滑音落地约 270ms，
+// 都比一个八分音符短，所以按谱面间距采样时它已经落稳了）。
+let techDueMs = 0;         // 技巧第二个音该判定的时刻（0 = 没有待判的技巧音）
+// 技巧音的"音准基准"：技巧的两个音在同一根弦上，整体调音偏高/偏低会一起平移。
+// 做法：**用上一个音实测的频率当基准，按音程算这个音应该在多少 Hz** ——
+//   真机实测（用户琴整体高 ~50 音分）：滑音 E4(335Hz) → 落点 298Hz；
+//   按绝对音高比会判成 D#4（错），按音程预期（335 × 2^(-2/12) = 297.7Hz）只差 2 音分（对）。
+// 用 Hz 而不是"音分偏差读数"：同一次演奏里两个一样的音，频率读数只差 1Hz，
+// 但拟合出来的音分数能差 85（余响干扰），所以基准必须用频率。
+let techRefHz = 0;         // 上一个音实测频率（技巧音算期望频率用）
+let lastJudgeHz = null;
 // ⚠ 判定**仍然用老的起音快照**（下面那一份）。差分谱只**量、只记**，不用来判。
 //
 // 为什么不用（这一轮离线量过了，两个方向都量了）：
@@ -570,6 +695,33 @@ const JUDGE_CAND = globalThis.__judgeCand == null ? true : !!globalThis.__judgeC
 // 原来写 190 —— 正好卡在 1 弦那批安静音的失配上（190/193/195），于是同一段里
 // 一半判对一半判错（用户报的"1弦1品不是每次都错"就是这个）。
 const CAND_FIT_MAX = 250;
+// ── §6「起音即读数」（2026-09-24 收工状态第 6 节）────────────────────────────
+// 思路（用户口径）：起音那一刻只判"这一下新加进来的那条线是什么音"，
+// 所以要在**以起音采样点为中心**的短窗上做 post − pre（负的归零），
+// 在这份"只属于这一下"的谱上独立量出一条成串的基频，再和谱面那个音比：
+//   · 同名 → 过；· 差 ≥2 个半音 → 判错（差 1 个半音不动，读数本身有 ±1 的抖动）；
+//   · 量不出、或两次量不一致（不可信）→ **退回原链路**（候选重排），不许硬判。
+// 频带必须**按弦分带**（谱面给了弦品就用那根弦的音域）：不限带时拨弦的低频闷响
+// 也能凑出 2f/3f，读数会锁到 82~170Hz 的垃圾线上 —— 离线在 vc_gf/read-sweep.mjs
+// 上量过（1弦1品的 16 下一调全错）。
+// ⚠ 2026-09-24 夜实测结论：**这条路的读数在真机上不可用，默认关闭**（用户口径：误杀 >1 就撤）。
+//   把 window.__judgeRead = 1 打开就能复现（离线探针 vc_gf/read-sweep.mjs 是同一套窗和尺子）：
+//     · §6 第 1 条那个窗（pre[−40,−10] / post[+10,+40]）**必须带按弦分带**才有读数：
+//       不带频带时限：1弦1品那 16 下**一条都读不对**（读数锁在 82~170Hz 的低频闷响上）；
+//       带上"该弦空弦~25品"的频带后：1弦1品 16/16、6段标定录音 17/39；
+//     · 但它在**和弦在响/旋律**的材料上依然不可用：hey_jude 标定集 24 个音里，
+//       两个窗"意见一致"的 7 个里有 5 个是错的（G5/B5/C5 这类高频垃圾）——放它判错就是误杀 5 个；
+//       琶音（6415慢速）52 下里采信的那些也基本都不对。
+//   → 结论：读数要能接进判定，得换成"稳定段（起音后 +50~+220ms）+ 按弦分带"那把尺子
+//     （离线：1弦1品 16/16、6段 39/39），而它在判定时刻(+90ms)还取不到，必须**延后取**
+//     —— 这正是 §1 里写的下一步。今天不做（§6 明确要求"一步不改"）。
+// 开关（离线对照用）：window.__judgeRead = 1 打开；window.__readGate = 'b2'|'b5'|'off'
+// 选"第二个窗"（只认两个窗意见一致的读数）；window.__readVeto = 2 改"差几个半音才判错"。
+const JUDGE_READ = globalThis.__judgeRead == null ? false : !!globalThis.__judgeRead;
+const READ_GATE = globalThis.__readGate || 'b2';
+const READ_VETO_SEMIS = globalThis.__readVeto == null ? 2 : Number(globalThis.__readVeto);
+// 弦号 → 空弦音高（标准调弦）
+const OPEN_STRING_MIDI = { 1: 64, 2: 59, 3: 55, 4: 50, 5: 45, 6: 40 };
 // 会话记录：每个音的"期望 / 实测"，包含判定比值、周期性(clarity)、电平、时刻。
 // 这是**唯一能用来调参的数据**：录一遍干净的（只弹对的）就等于拿到标准答案，
 // 不用再靠"你猜我有没有弹对"。
@@ -579,6 +731,9 @@ let sessionLog = [];
 // 复现不出来 —— 只能靠手机自己的台帐看"到底是什么被当成了起音"。
 // 导出记录里带上它，出问题一串就能定位是哪一关放过去的。
 let onsetLog = [];
+// 近似帧日志（2026-09-23）：电平过了门限、却没被认成起音的帧 + 被否决的原因。
+// 只留最近 120 条，导出里带出去（治"快弹有些音没收上"）。
+let nearMissLog = [];
 // 时间对齐：每个起音按"它出现在谱面的什么时刻"决定该判哪个音，而不是"弹一下就走一格"。
 // 真机录音实测：30 秒里检出 47 次起音，按次数对齐会整体错位 —— 那时阈值怎么调都没用
 // （从 1.0 到 1.2 都只过 13~14 个）。
@@ -720,10 +875,17 @@ async function loadNotes() {
   // 全部音符（原来只取前 60 个，所以光标走到一半多就"结束"了）
   // arp = 无谱面的逐音测试：用预先算好的时间轴 frontend/data/chord_arp.json
   if (!notes) {
-    const file = songKind === 'arp' ? './data/chord_arp.json' : './data/hey_jude.json';
+    const file = songKind === 'arp' ? './data/chord_arp.json'
+      : songKind === 'tech' ? './data/tech_practice.json'
+        : (scoreOf(songKind) && scoreOf(songKind).json) || './data/hey_jude.json';
     const data = await (await fetch(file)).json();
     notes = data.notes;
     notesMeta = data;            // 小节/拍号/速度都在这儿（节拍器要用）
+    // ⚠ 光标映射要在**两份都到齐**之后再做一次（2026-09-23，用户报"茉莉花没有光标"）：
+    //   buildTickMap() 是把"谱面拍点表"和"判定清单 notes"对起来的，
+    //   而新谱接入时谱面先渲染完、notes 后到（或反过来），只跑一次就会出现
+    //   "谱面出来了但没有光标"。这里 notes 一到位就补跑一次，两边就都齐了。
+    if (score) { try { buildTickMap(score, Number($('track') && $('track').value) || 0); } catch (e) {} }
   }
   return notes;
 }
@@ -751,6 +913,38 @@ function renderCells() {
       el.className = 'cell';
       el.id = 'cell' + i;
       el.innerHTML = `<b>${midiToNameOf(n.midi + pitchShift())}</b>${n.string}弦${n.fret}品`;
+      // 点格子 = 从这一格开始练（和谱面那条路同一个口径：
+      //   只认这一次点击，这一遍从这儿起，下一遍仍旧从头）。
+      // 跟弹进行中不改起点 —— 中途换起点会让"已经判到哪"和"光标在哪"错开。
+      el.onclick = () => {
+        if (!notes || !notes[i]) return;
+        if (micTimer) {
+          setVerdict('跟弹进行中：先点「停止」，再点你想从哪一格开始');
+          return;
+        }
+        noteIdx = i;
+        userPickedStart = true;
+        holdUntilMs = 0;
+        // 从新的地方开始练：**旧的标记要清掉**（跟谱面那条路的做法一致）——
+        // 不然新一段和上一段的绿/红混在一起，看不出这次练到哪、对错是哪一遍的。
+        if ($('marks')) $('marks').innerHTML = '';
+        const cellBox = $('cells');
+        if (cellBox && cellBox.querySelectorAll) {
+          cellBox.querySelectorAll('.cell.ok, .cell.bad').forEach((c) => {
+            if (c.classList) { c.classList.remove('ok'); c.classList.remove('bad'); }
+          });
+        }
+        wrongList = []; wrongNoted = new Set();
+        unclearCount = 0; missed = 0;
+        $('wrongs').textContent = '';
+        $('good').textContent = '0'; $('bad').textContent = '0';
+        if ($('unclear')) $('unclear').textContent = '0';
+        if ($('missed')) $('missed').textContent = '0';
+        highlightCurrent();
+        setVerdict(`这一遍从第 ${i + 1} 个音开始：`
+          + `<b>${midiToNameOf(notes[i].midi + pitchShift())}</b>`
+          + `（${notes[i].string}弦 ${notes[i].fret}品）—— 点「跟弹」开始`, '');
+      };
       row.appendChild(el);
     }
     box.appendChild(row);
@@ -808,6 +1002,7 @@ function micTick() {
     micTickBody();
   } catch (e) {
     const msg = (e && e.message) ? e.message : String(e);
+    if (globalThis.__vcDebug) console.log('[mic-error] ' + msg);
     err('判定循环出错（已自动继续）：' + msg);
     if (phase === 'settling') phase = 'waiting';
     micTimer = requestAnimationFrame(micTick);
@@ -819,6 +1014,13 @@ function micTickBody() {
   if (!buf) { micTimer = requestAnimationFrame(micTick); return; }
   const lv = rms(buf, buf.length - 1024, 1024);
   frames++;
+  // 开局的地板只吃"像环境"的帧（2026-09-23）：原来是前 30 帧无脑平均，
+  // 那一刻屏幕上要是有声音（提前弹了 / 房间有人说话），它会被当成环境音吸进去，
+  // 门槛跟着抬高 → 头几个音和轻音收不到（表现就像"第一次弹把界限顶死了"）。
+  // 现在比当前地板明显高的帧直接不参与，只让安静的帧把它拉下来。
+  // ⚠ 2026-09-23 曾把它改成"只吃安静帧"，结果房间一直有底噪时地板反而升不上去、
+  // 门限停在最低线，安静的杂音就能进来了（用户当天报"周围小声弹吉他都被收进去"）。
+  // 已撤回原来的写法：前 30 帧照常平均。
   if (frames <= 30) floor += (Math.min(lv, 0.05) * 0.9 - floor) * 0.3;
   else if (lv < floor) floor = floor * 0.9 + lv * 0.1;
   else floor = Math.min(floor * 1.0003 + 1e-7, 0.06);
@@ -827,6 +1029,11 @@ function micTickBody() {
 
   const flux = fluxRelOf(buf);
   const hfFlux = hfFluxRelOf(buf);      // 高频段通量：拨弦瞬态（连续相同音靠它）
+  // 2kHz+ 频带比自己 32ms 前涨几倍（起音层的"频带抬头"判据）：
+  // 和弦/分解和弦里前一根弦还在响，总电平几乎不跳，但那一下的高频能量会跳。
+  const hfBandRise = hfBandRiseOf(buf);
+  // 基频区（150~600Hz）抬头：和上面那条一起用，防止"同一拨被算两次"（跳音）
+  const lowBandRise = lowBandRiseOf(buf);
   const now = performance.now();
   // ③ 低频主峰：这一帧"听起来是什么音"。换音时它会跳 —— 快音的第二下靠这个抓。
   let domHz = 0;
@@ -855,11 +1062,47 @@ function micTickBody() {
       : '开始 —— 弹第一个音', couplingDetected ? 'bad' : '');
     highlightCurrent();                        // 开始就把光标摆到第一个音上
   }
-  // ── 跟节拍：光标和时间窗**全部由谱面时钟驱动**（和"等我弹"完全分开）──────
-  // 每次主循环只做一件事：关掉已经过期的窗口、把光标挪到当前时间窗。
-  // 起音只负责回答"这个窗口里有没有正确的音"，所以不存在"一个起音吃好几个音"。
-  if (modeKind === 'tempo' && phase === 'waiting' && tempo().tick(now)) return;
+  // ── 跟节拍 = 音驱动（2026-09-23 改口径）────────────────────────────────────
+  // 用户的口径：光标**弹一个过一个**、弹错停下重弹；时间不再由时钟一格一格推着走，
+  // 而是最后用**总时间**去对账（第一个音到最后一个音，容忍 ±10s），
+  // 中途拖了/停顿了按"漏拍 / 换和弦不流畅"记一次错。
+  // 所以这里不再调 tempo().tick()（那条路会把窗口过期算成错、一漏一路漏）。
+  // 节拍器改成独立开关（勾选框），跟节拍模式下它只出声当参考、不参与判定。
   const lagged = levelHist.length >= 3 ? levelHist[levelHist.length - 3] : 0;
+  // ── 漏拍 / 换和弦不流畅（2026-09-23）──────────────────────────────────────
+  // 该弹的时候长时间没动 → 记一次错误 + 漏拍标记；**不前进**，继续等这一个音。
+  // 容忍度按谱面走：max(1.5 × 这一处的谱面间隔, 2 × 拍长)，下限 0.7s。
+  // 这一格如果是**新小节 / 新和弦的第一格**，记成"换和弦不流畅"（数字谱上的"没跟上"），
+  // 否则记"漏拍" —— 两种分开，才知道是手慢还是手没动。
+  // ⚠ 口径（2026-09-23 用户定）：
+  //   · **只有跟节拍模式**才记漏拍/换和弦不流畅；
+  //   · "换和弦不流畅"**只有和弦谱**用，别的谱记"漏拍"；
+  //   · **等我弹模式只判对错**，不记漏拍、不记时机 —— 你停下来想多久都不算错。
+  if (modeKind === 'tempo' && phase === 'waiting' && lastOnsetMs > 0
+      && notes && notes[noteIdx] && missNoted !== noteIdx) {
+    const prevNote = notes[noteIdx - 1];
+    const ioiMs = prevNote ? Math.max(0.15, notes[noteIdx].t - prevNote.t) * 1000 : 400;
+    const beatMs = (60 / (userBpm || 76)) * 1000;
+    const limitMs = Math.max(700, Math.max(1.5 * ioiMs, 2 * beatMs));
+    if (now - lastOnsetMs > limitMs) {
+      missNoted = noteIdx;
+      const isChordScore = songKind === 'chords'
+        || !!(notes[noteIdx].chord || (prevNote && prevNote.chord));
+      const isChange = isChordScore && (!prevNote
+        || (notes[noteIdx].measure || 0) !== (prevNote.measure || 0)
+        || !!(notes[noteIdx].chord && prevNote.chord && notes[noteIdx].chord !== prevNote.chord));
+      missed++;
+      if (!wrongNoted.has(noteIdx)) { bad++; wrongNoted.add(noteIdx); }
+      markNote(noteIdx, 'bad');
+      if ($('missed')) $('missed').textContent = String(missed);
+      if ($('bad')) $('bad').textContent = String(bad);
+      if ($('heard')) $('heard').textContent = isChange ? '换和弦没跟上' : '漏拍';
+      const idleSec = ((now - lastOnsetMs) / 1000).toFixed(1);
+      setVerdict(isChange
+        ? `⚠ 换和弦不流畅：第 ${(notes[noteIdx].measure || 0) + 1} 小节这里停了 ${idleSec}s —— 重弹这一个`
+        : `⚠ 漏拍：这一格空了 ${idleSec}s —— 重弹这一个（谱面要 ${midiToNameOf(notes[noteIdx].midi + pitchShift())}）`, 'bad');
+    }
+  }
   // 起音判据调严一点：真拨弦是"明显"的一跳，环境声/说话不该触发。
   // 门限：比"脏环境"那版严一点，但别严到把正常拨弦挡掉
   // （上一版 1.8×/0.25 太狠，会把第一下吃掉 → 只能弹第二次）
@@ -920,20 +1163,44 @@ function micTickBody() {
   // 再加一条：**频谱形状**得变。音量起伏（打拍子/自动增益）是整体变亮，形状不变；
   // 拨弦会带进新的泛音，形状一定变。实测 4Hz 深打拍子能骗过"够不够陡"，
   // 但骗不过这一条（形状距离 ≈ 0）。
-  const shapeFlux = shapeFluxOf(buf);
+    const shapeFlux = shapeFluxOf(buf);
   // ── 起音层的判据在 engine/onset.js（阈值也都在那儿）────────────────────
   // 这里只负责把这一帧的量喂进去，然后用它给的结论。
+// 1 弦自己的电平基准（滑动）：1 弦最细最轻，实测电平 0.053~0.199，
+// 而绝对门限线在 0.05 —— 它天生就贴着那条线，所以"有时过有时不过"。
+// 用同一根弦自己刚才弹出来的电平当参照，把它的门限按比例压下来（不低于 gateFloor）。
+// 这不是给某首谱开特例：**任何谱子**只要那一格在 1 弦就按这个来。
+
   const gateOut = decideOnset({
     phase, now, refractoryUntilMs, lastOnsetMs, minGapCfg: CFG.minGapMs,
-    lv, prevLv, lagged, gate, floor, flux, hfFlux, shapeFlux, repeatSame,
+    lv, prevLv, lagged, gate, floor, flux, hfFlux, hfBandRise, lowBandRise, shapeFlux, repeatSame,
+    // ⚠ 2026-09-24：快段落标志（谱面这一段音间距 ≤350ms）——起音层用它放宽"2kHz 抬头"这条线
+    //   （1.8 而不是 2.5）。只影响快段落；慢/中速一位不改。
+    fastPassage: !!(notes && notes[noteIdx] && notes[noteIdx + 1]
+      && (notes[noteIdx + 1].t - notes[noteIdx].t) <= 0.35),
   });
   const { onset, sharpEnough, shapeChanged, strongGate } = gateOut;
+  // 近似帧（2026-09-23）：电平到了门限的八成、却没被认成起音 → 记下被否决的原因。
+  // 用户报"快弹有些音没收上、确定是检测没起来"，靠这份日志就能指出卡在哪一条。
+  if (!gateOut.onset && phase === 'waiting' && lv > gateOut.strongGate * 0.8) {
+    nearMissLog.push({
+      t: Number((now / 1000).toFixed(3)), why: gateOut.why,
+      lv: Number(lv.toFixed(4)), gate: Number(gateOut.strongGate.toFixed(4)),
+      prevLv: Number(prevLv.toFixed(4)), lagged: Number(lagged.toFixed(4)),
+      rise: Number((lv / (lagged + 1e-9)).toFixed(2)),
+      flux: Number(flux.toFixed(3)), hfFlux: Number(hfFlux.toFixed(3)),
+      shape: Number(shapeFlux.toFixed(3)), hfBand: Number((hfBandRise || 0).toFixed(2)),
+      loBand: Number((lowBandRise || 0).toFixed(2)),
+    });
+    if (nearMissLog.length > 120) nearMissLog.shift();
+  }
   // 起音层逐帧台帐（只在 test-follow-real.mjs 的 VC_ONSET_DEBUG=1 时打）：
   // 查"这一段为什么没被当起音 / 为什么一下被算成两下"用。对页面没有任何影响。
   if (globalThis.__vcOnsetDebug && lv > 0.02) {
     console.log(`[onset] t=${(now / 1000).toFixed(3)} 电平=${lv.toFixed(4)} 上帧=${prevLv.toFixed(4)}`
       + ` 滞后=${lagged.toFixed(4)} 门限=${strongGate.toFixed(4)} 陡=${sharpEnough ? 'y' : 'n'}`
       + ` 形状=${shapeFlux.toFixed(3)} 通量=${flux.toFixed(3)} 高频=${hfFlux.toFixed(3)}`
+      + ` 频带抬头=${hfBandRise.toFixed(2)}`
       + ` 上升=${(lv / (lagged + 1e-9)).toFixed(2)} 重复=${repeatSame ? 'y' : 'n'}`
       + ` 相位=${phase} 冷却=${now >= refractoryUntilMs ? 'y' : 'n'} → ${onset ? '起音' : ''}`);
   }
@@ -953,13 +1220,23 @@ function micTickBody() {
     $('lv').textContent = `环境 ${floor.toFixed(4)} / 门限 ${strongGate.toFixed(4)} / 电平 ${lv.toFixed(4)} / 最近最强 ${peakLvRef.toFixed(4)}`;
   }
 
-  if (onset || jumpOnset) {
+  // 技巧第二个音：到点就当成"一次起音"走同一条路（不需要真的拨响）
+  const techDue = modeKind !== 'tempo' && phase === 'waiting' && techDueMs && now >= techDueMs;
+  if (techDue) techDueMs = 0;
+
+  if (onset || jumpOnset || techDue) {
     onsetPeakLv = lv;                    // 记下峰值电平，判定时用它验"尾巴"（判据②）
+    const tech = !!techDue;
+    // 真起音先到（比如滑音滑到位那一下也会有点动静）→ 取消排队中的技巧时刻，
+    // 否则同一个音会被判两次。谁先到算谁的。
+    techDueMs = 0;
     if (globalThis.__onsetLog) globalThis.__onsetLog.push(Number((now / 1000).toFixed(3)));
     onsetLog.push({
       t: Number((now / 1000).toFixed(3)), level: Number(lv.toFixed(5)),
       floor: Number(floor.toFixed(5)), gate: Number(strongGate.toFixed(5)),
       flux: Number(flux.toFixed(3)), hfFlux: Number(hfFlux.toFixed(3)),
+      hfBand: Number(hfBandRise.toFixed(2)),
+      tech,
       repeat: repeatSame, expect: (notes && notes[noteIdx]) ? midiToNameOf(notes[noteIdx].midi) : null,
     });
     const nowSpec = getFluxSpec();
@@ -977,8 +1254,9 @@ function micTickBody() {
     // 用户口径："有没有可能听到了光标就动，判错判对的延迟用户是感觉不到的" —— 可以：
     // 判定本身还要 90ms 才出结论，但"该弹下一格了"这件事现在就告诉他；
     // 对/错的结果回来之后只是把那格标绿/标红（markNote），不再挪光标。
-    // （跟节拍模式的光标本来就由时钟驱动，这里只管"等我弹"。）
-    if (modeKind !== 'tempo' && notes && noteIdx + 1 < notes.length) highlightCurrent(noteIdx + 1);
+    // ⚠ 不再把光标往前预览（2026-09-23）：弹错要"停在原地重弹"，
+    // 预览一格会让用户以为已经过了、也让"没反应过来"更乱。
+    // 光标只在**判过之后**由 advanceNote() 往前挪。
     // 峰值快照：只在**起音这一刻**取一次 170ms 频谱（8192 点，bin 宽 5.9Hz）。
     // 判定只用它 —— 之后的余响、延音、衰减一概不参与（这就是"只处理峰值"）。
     try {
@@ -1015,6 +1293,12 @@ function micTickBody() {
   // 起音之后等多久才判定：**90ms**。
   // ⚠ 2026-09-22 晚试过压到 60ms（想减延迟），用户实测"弹对但判错、还会漏音，
   // 比改之前差"——判定窗整体往前挪之后，窗里上一根的音多了一截。已改回 90ms。
+  // ⚠ 2026-09-24 试过"**按需延后**"：把判定推到起音后 250ms，让那扇 170ms 窗自动变成
+  //   稳定段（起音+80~+250，闷响已衰减）。在两条真机标定集上（错音测试 / 24 音旋律）
+  //   结论是 —— **数字一个都没变**（错音测试 对 5、24 音 对 14，延后前也一样）。
+  //   所以"高把位侥幸过"不是被闷响填出来的泛音假象，我对根因的判断不完整 →
+  //   **没上线**。下一步先查"那 5 次到底走了哪条放行通道"（passCand / quietOk / 兜底），
+  //   有了证据再动，不再猜。
   if (phase === 'settling' && now - onsetAtMs >= 90) {
     phase = 'waiting';
     const sr2 = audio.getRate();
@@ -1031,9 +1315,45 @@ function micTickBody() {
     // 混合信号里会直接放弃（返回 0 音高）—— 于是连续两个快音里的第二个被丢掉，
     // 用户看到的就是"第二个音跟不上"。现在补一把尺子：只要谐波墙立着（谐噪比够高）
     // 就继续判；真正的噪声/风/拍桌子谐波墙是立不起来的（实测 1.6 倍 vs 2 万倍）。
+    // ⚠ 这道闸门**只对真实谱面（Hey Jude 这条单旋律）生效** —— 2026-09-23 我一度把它
+    //    "通用"到所有单音路径（逐音测试 / 技巧练习），结果**打崩了分解和弦**：
+    //   判据是 YIN 的周期性，而分解和弦里前一根弦还在响，YIN 必然放弃（clarity=0），
+    //   于是真弹的音被当"不像琴声"逐个丢掉。证据（用户的两份 arp 导出）：
+    //     9:58 那份（改之前）：32 个起音、**0 个被丢**、31 个判对；
+    //     10:46 那份（改之后）：开始出现 result=undefined（被丢）的起音，用户报"3弦都收不进去"。
+    //   所以判据能通用、**适用条件不能通用**：YIN 的 clarity 在叠音里必失效。
+    //   **改法（2026-09-23）**：判据换成"clarity 过 **或** 谐波墙 ≥ pluckHnrMin"——
+    //   谐波墙在叠音里也立得住（C 和弦那段实测 3.3~8.5，噪声/敲桌子 ≈1.6），
+    //   所以这条**对所有单音路径一样**（真实谱面 / 逐音测试 / 技巧练习 / 分解和弦逐音）。
+    //   和弦路径（chords，一次多根弦同时响）不走这里。
+    // 单音路径全都走这条闸门（真实谱面 / 逐音测试 / 技巧 / 分解和弦逐音）——
+    // 因为判据已经换成"有没有弦被拨响"（谐波墙），它在叠音里也立得住。
+    // 和弦路径（chords，一次多根弦同时拨）不走这里。
+    const singleNotePath = !!(notes && notes.length);
     let notAString = false;
-    if (songKind === 'heyjude') {
-      const clarityFail = !(a.pitch.clarity > 0.42) || !(a.pitch.hz > 55);
+    if (singleNotePath) {
+      // ⚠ 2026-09-23 我在这里给 1 弦开过一个口子（"只要有 2kHz 抬头 ≥2.5 就不丢"），
+      //    意图是救 1 弦里 clarity=0 的那几种音。**结果是敲桌子被不停判对**：
+      //    敲桌子正是宽频瞬态，2kHz 抬头极大 —— 这条口子把"最不像琴声"的东西放进来了。
+      //    已撤：回到原来那把尺子（YIN 的周期性说了算），1 弦不再例外。
+      // ① YIN 说得算：周期性强
+      // 1 弦那一格单独放宽（用户口径：**只在谱面这一格是 1 弦时**放宽，别处不放）：
+      // 只把"周期性"这条线降一档（0.42 → 0.25）；电平、形状、间隔一律不动。
+      // 敲桌子/风那类 clarity 通常 <0.2，照样过不来；1 弦真音在叠音里常掉到 0.3 上下，这一档正好救它。
+      const expStr1 = !!(notes && notes[noteIdx] && notes[noteIdx].string === 1);
+      const clarMin = expStr1 ? (CFG.pluckClarityMinLow || 0.25) : CFG.pluckClarityMin;
+      const byClarity = (a.pitch.clarity > clarMin) && (a.pitch.hz > CFG.pluckMinHz);
+      // ② 谐波墙说得算：数不出周期，但"谐波成串"（叠音里 YIN 会放弃，墙却立着）
+      let hnrDom = 0;
+      try {
+        const n = 1 << Math.floor(Math.log2(Math.min(8192, buf.length)));
+        const srNow = (audio.getCtx() && audio.getCtx().sampleRate) || 48000;
+        const sp = spectrumOf(buf.subarray(buf.length - n));
+        const domF0 = dominantF0InBand(sp, srNow, n, 90, 900).hz || 0;
+        if (domF0 > 0) hnrDom = harmonicity(sp, srNow, n, domF0);
+      } catch (e) { hnrDom = 0; }
+      const stringOk = byClarity || hnrDom >= (CFG.pluckHnrMin || 3);
+      const clarityFail = !stringOk;
       if (clarityFail) {
         let hnr = 0;
         let sparse = 0;
@@ -1071,6 +1391,17 @@ function micTickBody() {
         // 结果是环境里那些"YIN 说不行、频谱却有点结构"的声音全放了进来，手机上又变成
         // **任何音都判对**。所以回到 YIN 说了算：宁可丢掉连音的第二下（已知缺口），
         // 也不能让随便什么声音都当音符。
+        // ── 过滤要留，但判据要换（2026-09-23 用户两句话定下来的）─────────────
+        // 用户说得很清楚：
+        //   ① "起音全进通道，那敲桌子/说话/周围杂音的起音都可以轻松判错了？体验不能这么差"
+        //      → **过滤必须留**：环境音不进判定、不报错、不前进。
+        //   ② "被丢掉不就代表真正需要他的时候也过不去了？"
+        //      → **过滤不能把真音吞掉**。
+        // 两条同时满足只有一个办法：把判据从"YIN 的周期性"换成"**有没有弦被拨响**"——
+        //   谐波墙（harmonicity）：真拨弦 2 万倍以上、分解和弦里 3.3~8.5，
+        //   而敲桌子/风 ≈1.6。所以：
+        //     stringOk = clarity 过 **或** 谐波墙 ≥ pluckHnrMin(2.5)
+        //   不用 YIN 单独定生死（它在叠音里必失效，真音就是这么被吞的）。
         notAString = true;
         const last0 = onsetLog[onsetLog.length - 1];
         if (last0) {
@@ -1082,12 +1413,12 @@ function micTickBody() {
         }
       }
     }
-    if (songKind === 'heyjude' && notAString) {
+    if (notAString) {
       {
         const last = onsetLog[onsetLog.length - 1];
         if (last) (last.retry = last.retry || []).push(`${(a.pitch.clarity || 0).toFixed(2)}/${Math.round(a.pitch.hz || 0)}Hz`);
       }
-      if (windowTries < 2) {
+      if (windowTries < CFG.pluckRetries) {
         windowTries++;
         onsetAtMs = now + 30;            // 再过 60ms 重测（settling 在 +90ms 触发）
         phase = 'settling';
@@ -1127,9 +1458,23 @@ function micTickBody() {
       // 这条"按顺序"的老规矩有一个已知弱点（漏检一次后面全体错开一位），要改就得**连光标
       // 的推进方式一起改**（让光标也按同一个规则走），不能只改一半 —— 见思路整理第 3 节。
       let best = noteIdx;
-      let devMs = null;
-      if (modeKind === 'tempo') {
-        // ── 跟节拍：这一下**只看它落没落在某个音的时间窗里** ────────────────
+ let devMs = null;
+ // ⚠ 2026-09-24（用户报"全弹快没有提示"）：跟节拍模式下**逐音时间账**要真的算。
+ //   口径（音驱动，不改"哪个音"的匹配）：拿**这一下与上一拨的间隔**去比**谱面这两格的间隔** ——
+ //     devMs < 0 → 这一下走得比谱面快（抢拍）；> 0 → 比谱面慢（拖拍）。
+ //   为什么用"间隔"而不是"绝对时刻"：绝对时刻里含着"他起手晚了多少 / 麦克风延迟"，
+ //   那部分不是演奏快慢；间隔差值只反映**这一段他自己的节奏相对谱面快了多少**，
+ //   所以"全弹快"会从第二三个音开始就一路记抢拍。
+ //   （老的那段"时钟对号"仍然留着 but 停用：if (false) —— 那是按网格等，弹在前面会被吞。）
+ if (modeKind === 'tempo' && best > 0 && lastOnsetMs > 0 && onsetAtMs > 0) {
+   const scoreGap = (expectedAtMs(best) - expectedAtMs(best - 1));
+   const myGap = onsetAtMs - lastOnsetMs;
+   if (Number.isFinite(scoreGap) && scoreGap > 0 && myGap > 0) devMs = myGap - scoreGap;
+ }
+      if (false) {   // 2026-09-23：跟节拍改音驱动，老"时钟对号"这条路停用（保留对照）
+        // ⚠ 这条路已经不通了（2026-09-23：跟节拍改成音驱动，见下面 micTickBody 的说明）。
+        // 保留代码是为了对照老口径，条件永远是 false。
+        // ── 老口径：这一下只看它落没落在某个音的时间窗里 ──────────────────
         // 不往前跳、也不把中间的音一起吃掉：窗口过期是"时钟"那边的事（tempoTick）。
         // 落在窗口外（弹早了/弹晚了）→ 这个起音不算数，等窗口关掉记错。
         const elapsed = onsetAtMs - micStartedAt;
@@ -1227,14 +1572,179 @@ function micTickBody() {
       //   ② 快音的第二下 → 差分谱把上一个音减掉了 → 第二个音能单独量出来（这就是"快音怎么办"）；
       //   ③ 噪声/拍桌子 → 差分谱是宽带，量不出稳定音高 → 测不准。
       // 找峰范围放到 ±250 音分（两个半音）：范围太窄会重新把读数锚回期望音。
-      const spec = judgeSpec || onsetPeakSpec || novel;
+      // ⚠ 2026-09-23 试过"判定只用抬头加权的那份谱"（onsetPeakSpec，用户的设计意图：
+      //   上一根的余波在起音时是下降的，只算抬头的那条线）——**实测把真音也抹掉了**：
+      //   真机 击弦 3/0、勾弦 2/0、滑音 4/0 → **0/1、2/0、2/1**。
+      //   原因：加权是"比 43ms 前涨了几倍−1"，新拨那一下若涨得不够猛（1.1~1.3 倍），
+      //   它的谐波也被压到接近 0，谱就废了。**设计意图对，这个实现太损**。
+      //   正确的实现要用"起音瞬间前后各几毫秒"的差分（需要环形缓存 + 记住起音采样点），见调研文档。
+      // 所以现在仍然用长窗（judgeSpec）当主判据，抬头快照只作备选。
+      // ── 判定只用"抬头的那部分"（用户口径，2026-09-23）──────────────────────────
+      // 用户的原话：**每一个音符的起音只单独判这个音符的音准；在这个窗口里，比它低（折线低）
+      //  或者正在减弱的音，都不做处理。**
+      // 逐频点看就是：只留"起音后比起音前高"的那些频点，跌下去的一律归零 ——
+      // 也就是 **起音后 40ms − 起音前 40ms（负的削成 0）**，再零填充到 8192 保证低音的分辨率。
+      // ⚠ 为什么必须 40ms + 零填充：20ms 窗 bin 宽 50Hz，低音（E2/C3）根本分不开，
+      //   100Hz 那种伪基频总能凑出 200/300/400（用户导出里 detHz=100 就是这么来的）。
+      let onDiffSpec = null;   // 起音前后相减后的谱（只留抬头的那部分）
+      let srDOut = 48000;
+      try {
+        const srD = (audio.getCtx() && audio.getCtx().sampleRate) || 48000;
+        srDOut = srD;
+        const backD = Math.round(((now - onsetAtMs) / 1000) * srD);
+        const WD = Math.round(0.040 * srD);
+        if (backD > WD * 2 && backD + WD < buf.length) {
+          const padTo = (src) => { const o = new Float32Array(8192); o.set(src.subarray(0, Math.min(src.length, 8192))); return o; };
+          const post = spectrumOf(padTo(buf.subarray(buf.length - backD, buf.length - backD + WD)));
+          const pre = spectrumOf(padTo(buf.subarray(buf.length - backD - WD, buf.length - backD)));
+          onDiffSpec = new Float32Array(post.length);
+          for (let i = 0; i < post.length; i++) { const v = post[i] - pre[i]; onDiffSpec[i] = v > 0 ? v : 0; }
+        }
+      } catch (e) { onDiffSpec = null; }
+      // ⚠ 2026-09-23 实测记录：把"起音前后 40ms 相减（只留抬头）"接成**判定用的谱**后，
+      //   两边都变差 —— 击弦 3/0→2/1、逐弦 4/1→2/1、一直弹1弦1品 对0→对1。
+      //   原因：相减得到的是"增量"，它会低估"本来就已经在响的音"的谐波、又放大噪声，
+      //   而候选重排需要一份**正常形态的谐波列**才能比失配。所以这一步撤回，
+      //   **相减只用于读数（detHz/detCents）**，判定仍然用长窗。
+      // ⚠ 2026-09-24：判定输入可以换成"**只属于这一下**的差分谱"（起音前后各 40ms 相减、只留抬头、
+      //   零填充 8192）。开关 `__judgeOnDiff`（测试用），默认关闭 = 现在的行为。
+      //   依据：现在这扇 170ms 长窗里同时装着"新拨的能量 + 上一根弦的余响 + 拨弦闷响"，
+      //   两种证据混在一起分不开 —— 加严对手会误杀弹对的，删掉反证又放过弹错的（三次实验结论）。
+      // ⚠ 2026-09-24：**以起音采样点为中心的前后短窗差分**（文档 9-21 记的那条正解）。
+      //   和上面那份 `onDiffSpec` 的区别：那份的窗落在"判定时刻"（起音后 90ms）附近，
+      //   慢音还行，快音/琶音时它已经混进下一个音；这份**用 onsetAtMs 反推出起音采样点**，
+      //   取 pre = [起音-40ms, 起音-10ms]、post = [起音+10ms, 起音+40ms]（各留 10ms 空档避开
+      //   起音瞬态那一下的宽带噪声），相减只留"这一下新加进来的"。
+      //   buf 本身有 341ms，够反推 —— 不需要额外的环形缓存。
+      let attackDiffSpec = null;
+      try {
+        const srA = (audio.getCtx() && audio.getCtx().sampleRate) || 48000;
+        const backA = Math.round(((now - onsetAtMs) / 1000) * srA);   // 起音点距"现在"多少采样
+        const WA = Math.round(0.030 * srA);                            // 30ms 窗
+        const gapA = Math.round(0.010 * srA);                          // 两侧空档
+        if (backA > WA + gapA && backA + WA + gapA < buf.length) {
+          const padA = (src) => {
+            const o = new Float32Array(8192);
+            o.set(src.subarray(0, Math.min(8192, src.length)));
+            return o;
+          };
+          const preA = spectrumOf(padA(buf.subarray(buf.length - backA - gapA - WA, buf.length - backA - gapA)));
+          const postA = spectrumOf(padA(buf.subarray(buf.length - backA + gapA, buf.length - backA + gapA + WA)));
+          attackDiffSpec = new Float32Array(preA.length);
+          for (let i = 0; i < preA.length; i++) { const v = postA[i] - preA[i]; attackDiffSpec[i] = v > 0 ? v : 0; }
+        }
+      } catch (e) { attackDiffSpec = null; }
+      const spec = (globalThis.__judgeAttackDiff && attackDiffSpec) ? attackDiffSpec
+        : (globalThis.__judgeOnDiff && onDiffSpec) ? onDiffSpec
+          : (judgeSpec || onsetPeakSpec || novel);
       const specRate = judgeSpec || onsetPeakSpec ? peakRate : sr2;
       const specN = judgeSpec || onsetPeakSpec ? PEAK_N : a.fftN;
+      // ── §6「起音即读数」（第 1~4 条）────────────────────────────────────────
+      // ① 窗以**起音采样点**为中心：pre = [起音−40, 起音−10]ms、post = [起音+10, 起音+40]ms；
+      // ② post − pre（负的归零）= "这一下新加进来的谱"；
+      // ③ 在这份谱上、**按该弦的频带**量一条"最响的、自带 2f/3f、且不是更低那根谐波"的基频；
+      // ④ 可信度门：两个互不相同的锚定窗都量出来、而且**意见一致**（差 ≤1 个半音）才采信；
+      //    量不出或两次打架 → 一律不硬判（读到多少只写进导出记录，判定退回原链路）。
+      // 为什么要第二个窗：拨弦那一下的闷响/别的弦的余响偶尔也凑得出一次假读数，
+      // 两个不同位置的窗同时被同一条假线骗到的概率低得多；而真音在两个窗里都立着。
+      let readHz = null, readHz2 = null, readMidi = null, readSemis = null;
+      let readConf = false, readVeto = false;
+      if (JUDGE_READ) {
+        try {
+          const srR = (audio.getCtx() && audio.getCtx().sampleRate) || 48000;
+          const backR = Math.round(((now - onsetAtMs) / 1000) * srR);   // 起音点在"现在"之前多少采样
+          // 相对起音的时刻（秒）→ buf 里的下标（buf 末尾就是"现在"）
+          const at = (sec) => buf.length - backR + Math.round(sec * srR);
+          const padR = (src) => {
+            const o = new Float32Array(8192);
+            o.set(src.subarray(0, Math.min(8192, src.length)));
+            return o;
+          };
+          const anchorDiff = (preFrom, preLen, postFrom, postLen) => {
+            const p0 = at(preFrom), q0 = at(postFrom);
+            const n1 = Math.round(preLen * srR), n2 = Math.round(postLen * srR);
+            if (p0 < 0 || q0 < 0 || p0 + n1 > buf.length || q0 + n2 > buf.length) return null;
+            const post = spectrumOf(padR(buf.subarray(q0, q0 + n2)));
+            const pre = spectrumOf(padR(buf.subarray(p0, p0 + n1)));
+            const d = new Float32Array(post.length);
+            for (let i = 0; i < post.length; i++) { const v = post[i] - pre[i]; d[i] = v > 0 ? v : 0; }
+            return d;
+          };
+          // 按弦分带：谱面给了弦品 → 只在那根弦的音域里读（空弦下 1 个半音 ~ 25 品）
+          const openM = OPEN_STRING_MIDI[exp.string];
+          const band = openM
+            ? (() => {
+              const o = 440 * Math.pow(2, (openM + pitchShift() - 69) / 12);
+              return { loHz: o * Math.pow(2, -2 / 12), hiHz: o * Math.pow(2, 25 / 12) };
+            })()
+            : {};       // 没有弦品的格子（和弦/扫弦不走这里）→ 用吉他音域
+          const w1 = anchorDiff(-0.040, 0.030, 0.010, 0.030);       // §6 第 1 条那个窗
+          const w2 = READ_GATE === 'b2' ? anchorDiff(-0.053, 0.043, 0.010, 0.043)
+            : READ_GATE === 'b5' ? anchorDiff(0.010, 0.040, 0.050, 0.040)
+              : null;
+          const r1 = w1 ? readPluckF0(w1, srR, 8192, band) : null;
+          const r2 = w2 ? readPluckF0(w2, srR, 8192, band) : null;
+          if (r1) readHz = r1.hz;
+          if (r2) readHz2 = r2.hz;
+          if (r1) {
+            const m1 = 69 + 12 * Math.log2(r1.hz / 440);
+            const m2 = r2 ? 69 + 12 * Math.log2(r2.hz / 440) : null;
+            const agree = (m2 == null) ? (READ_GATE === 'off') : (Math.abs(m1 - m2) <= 1);
+            if (agree) {
+              readConf = true;
+              readMidi = Math.round(m2 == null ? m1 : (m1 + m2) / 2);
+              readSemis = readMidi - (exp.midi + pitchShift());
+              readVeto = Math.abs(readSemis) >= READ_VETO_SEMIS;
+            }
+          }
+        } catch (e) { readVeto = false; }
+      }
       // ── 判定：候选重排（本音 vs ±1 品 vs ±2 品）────────────────────────────
       // spec 就是"判定这一刻往回 170ms"那扇窗，也就是 test/gt-notes.mjs 里验过的那扇。
       // 判定层在 engine/judger.js（候选重排 + 判过规则 + 阈值）
       let candMatch = JUDGE_CAND
-        ? judgeNote({ spec, sampleRate: specRate, fftSize: specN, expectedMidi: exp.midi + pitchShift() })
+        // ⚠ 2026-09-24：这里试过给候选重排传 rise（O2P 抬头加权）+ prevMidi（剔掉上一音的余响），
+        //   在**带真值的旋律真机集**（vc_gf/tl-heyjude-label.json，24 个音）上 A/B：
+        //     开着 = 对 7 / 错 6；关掉 = 对 7 / 错 5  → **变差，没上线**。
+        //   能力本身留在 engine 里（analysis.js 的 opts.rise / opts.prevMidi，不传=不变），
+        //   等找到在同一个标定集上"对更多、错更少"的用法再接回来。
+        ? judgeNote({
+          spec, sampleRate: specRate, fftSize: specN, expectedMidi: exp.midi + pitchShift(),
+          // ⚠ 2026-09-24（用户口径）：**谱面给了弦品这一格，就把候选表收到 ±1/±2 品** ——
+          //   1弦1品 弹不出低八度（那是 4弦3品），别再拿"约 F3/F2"去说他。
+          //   没有弦品的格子（和弦/扫弦）保持原样，低八度守卫在那条路上继续生效。
+          opts: (() => {
+            if (exp.string == null) return { maxOffset: null, bandLo: 0, bandHi: 0 };
+            // 弦 → 空弦音高（标准差：1弦E4=64 / 2弦B3=59 / 3弦G3=55 / 4弦D3=50 / 5弦A2=45 / 6弦E2=40）
+            const OPEN = { 1: 64, 2: 59, 3: 55, 4: 50, 5: 45, 6: 40 };
+            const open = OPEN[exp.string];
+            if (!open) return { maxOffset: 2, bandLo: 0, bandHi: 0 };
+            const o = 440 * Math.pow(2, (open + pitchShift() - 69) / 12);
+            // ⚠ 诊断开关（默认关，产品行为不变）：把"抬头加权"和"上一音余响剔除"
+            //   这两条 engine 里已有的能力接上看数字 —— 2026-09-24 在旋律真机集上试过是变差的，
+            //   但那次琶音靶子配错了进行（见 vc_gf/tl-6415.json 那一段的说明），要在**修好的靶子**上重测。
+            const extra = {};
+            if (globalThis.__judgeRise && rise) {
+              extra.rise = rise;
+              extra.riseBinHz = ((audio.getCtx() && audio.getCtx().sampleRate) || 48000) / FLUX_N;
+            }
+            if (globalThis.__judgePrev && best > 0 && notes[best - 1]) {
+              extra.prevMidi = notes[best - 1].midi + pitchShift();
+            }
+            return {
+              ...extra,
+              maxOffset: 2,                       // 谱面给了弦品 → 候选只留 ±1/±2 品
+              // ⚠ 2026-09-24（用户实测"高把位乱弹有概率过"）：**响的音才要求本音明显领先**。
+              //   实测那 5 次侥幸过全在电平 0.15~0.22：本音失配 226~249（落在"弹错"档），
+              //   领先倍数只有 0.94~1.03（跟最强邻居基本打平）—— 收到 1.05 就全挡住。
+              //   一律收紧会误杀 3 个弹对的音（多为轻音、证据本来就弱），所以按电平分档：
+              //   **电平 ≥0.10 要领先 1.05；<0.10 仍用 0.90**（轻音那侧不动）。
+              rivalMargin: (lv >= 0.10 ? 1.05 : 0.90),
+              bandLo: o * Math.pow(2, -1 / 12),   // 本弦空弦下 1 个半音（留点容错）
+              bandHi: o * Math.pow(2, 25 / 12),   // 到 25 品
+            };
+          })(),
+        })
         : null;
       let candSelf = candMatch ? candMatch.self : null;
       let candRival = candMatch ? candMatch.rival : null;
@@ -1253,7 +1763,13 @@ function micTickBody() {
       if (modeKind !== 'tempo' && fastPair && candMatch && candBest && candSelf && notes[best + 1]
         && candBest.midi === notes[best + 1].midi && candSelf.mismatch > 200) {
         const r2 = judgeNote({ spec, sampleRate: specRate, fftSize: specN, expectedMidi: notes[best + 1].midi + pitchShift() });
-        if (r2.self && r2.self.mismatch + 60 < candSelf.mismatch) {
+        // ⚠ 2026-09-24：**跳音必须双证据**（用户 10:27 导出里 21.167s 那处真拨弦被记成
+        //   "漏了 A#3（跳过去了）"，他不认这个判定）。原来只要"下一个音比当前音好 60"就跳，
+        //   而余响把当前音罚到 250~300 时，"好 60"太容易满足。
+        //   现在多一条**绝对质量**要求：下一个音自己必须落在"弹对"那一档（失配 < 190，
+        //   实测分布：弹对 118~195）。不满足 → 不跳，老老实实判"这一格"，用户重弹即可，
+        //   绝不会被系统悄悄当成"你没弹"。
+        if (r2.self && r2.self.mismatch < 190 && r2.self.mismatch + 60 < candSelf.mismatch) {
           // 当前这个音：你没弹它 → 记"漏"（不是判你弹错）
           missed++;
           wrongList.push(`第${(exp.measure || 0) + 1}小节 漏了${midiToNameOf(exp.midi)}（跳过去了）`);
@@ -1363,6 +1879,9 @@ function micTickBody() {
       // 判定窗是"起音后约 90ms 往回 170ms"，大部分是新拨的那个音。
       // estP = 判定窗上的多谐波测量（这就是上面那个"准 6 倍"的值）
       const estP = estimateF0ByPeaks(spec, specRate, specN, exp.midi + pitchShift(), {});
+      // 记下"这一次量出来的频率"：下一个音如果是技巧音，用它当音程基准（见 techRefHz）。
+      // ⚠ 必须写在 estP 声明之后 —— 写前面就是暂时性死区，主循环会整条断掉（今天栽第二次）。
+      lastJudgeHz = (estP && estP.f0) ? estP.f0 : null;
       // ⚠ 试过改用"判定窗"（estP.cents）：它看着准（中位 9.9 音分），但**什么都判对** ——
       // 用户 18:24 那份"随便弹"的记录里，用它 64/66 仍然判对。原因和快照一样：
       // **都是锚在谱面那个音上找**，任何输入都能在期望音附近找到点东西。
@@ -1459,8 +1978,248 @@ function micTickBody() {
       // 那个 const 声明在几行之后，在声明前访问会抛 ReferenceError（暂时性死区）。
       // 2026-09-22 就是这么把主循环弄死的：音够响时 && 短路不发作，1 弦衰减到 0.06 以下才炸。
       const quiet = lv < 0.06;
-      const quietOk = quiet && Math.abs(estP.cents) <= 45;
-      const pass = JUDGE_CAND && candMatch ? (passCand || quietOk) : (reliable && Math.abs(centsFixed) <= 75);
+      // ⚠ 要用 nearMidi（不看答案的独立读数）就必须在这儿算 —— 它在上面的行里已经定义好了；
+      //    往后挪到 `const midiP = nearMidi;` 之后会踩暂时性死区，判定循环整条抛错（2026-09-23 栽过一次）。
+      // ⚠ 2026-09-23 试过把这里的容差从 ±1 收到 0（想堵住"差半音也判过"），
+      //   **实测把技术练习打崩了**：击弦 3/0→2/1、勾弦 2/0→0/1、滑音 4/0→2/1。
+      //   原因：这个"独立读数"（低频带最强线 dominantF0InBand）本身就不够准
+      //   （它就是页面上那个"听到"，经常差半音），**不能拿它当等号用**。
+      //   所以容差回 ±1；"听到≠期待却判过"要从**显示**和**判定结论**统一上解决（见下一步）。
+      const heardIsExpected = Number.isFinite(nearMidi)
+        && Math.abs(nearMidi - (exp.midi + pitchShift())) <= 1;
+      // ⚠ 轻音兜底不能只看"锚在期望音上"的读数（2026-09-23，用户实测）：
+      //   1 弦最轻，电平常在 0.06 以下 → 一直走这条 → **弹什么音都算过**（他连续弹 1弦1品，全过；
+      //   别的弦响一些、不走这条，反而会被判错——这正是他看到的"1弦1品最畅通"）。
+      //   所以再加一条：**候选重排必须认为这一下像谱面那个音**（本音失配 < fitMax 250）。
+      //   真·轻音（弹的就是谱面那个音）本音失配很小，照样过；弹的是别的音则失配很大，判错。
+      // ⚠ 按"我们知道谱子"来分场景（用户口径，2026-09-23）：
+      //   · **谱面这一格是 1 弦** → 放宽：不要求候选也同意（1 弦基频弱、读数本来就不稳，先让它进来）；
+      //   · 别的格子 → 收紧：轻音兜底也要候选认为它像谱面那个音（挡住"拿一个错音到处蒙"）。
+      //   技巧格（exp.tech）本来就走它自己那条路（一次起音 + 按 BPM 等第二个音），这里不掺和。
+      const expIsStr1 = !!(exp && exp.string === 1);          // 谱面这一格是不是 1 弦
+      // ── 起音台阶（2026-09-23，用户设计）──────────────────────────────────────
+      // 「只知道谱面、也知道起音时刻」→ 只问一件事：**谱面这个音的基频位置上，
+      //   起音前后各 5ms 有没有一个台阶**（后 5ms ÷ 前 5ms）。
+      //   · 上一根的余响：在这个尺度上是连续下降 → 比值 ≈1（甚至 <1）；
+      //   · 新拨的一下：几毫秒内从无到有 → 比值远大于 1；
+      //   · 4Hz 打拍子 / 手机自动增益：周期 250ms，5ms 内涨不了多少 → 比值接近 1；
+      //   · 敲桌子/说话：不在"谱面这个音的基频"上 → 也是接近 1。
+      // 1 弦（细、轻、基频弱）单独放宽；技巧格不走这条（它按 BPM 等第二个音）。
+      let stepRatio = null;
+      try {
+        const srNow = (audio.getCtx() && audio.getCtx().sampleRate) || 48000;
+        const back = Math.round(((now - onsetAtMs) / 1000) * srNow);   // 起音点在这之前多久
+        const N5 = Math.max(96, Math.round(0.005 * srNow));            // 5ms
+        if (back > N5 * 2 && back + 8 < buf.length) {
+          const expHzS = 440 * Math.pow(2, (exp.midi + pitchShift() - 69) / 12);
+          const bandE = (from) => {
+            const seg = buf.slice(Math.max(0, from), Math.max(0, from) + N5);
+            if (seg.length < 8) return 0;
+            const m = spectrumOf(seg);
+            const binHz = srNow / seg.length;
+            const lo = Math.max(1, Math.floor((expHzS * 0.966) / binHz));
+            const hi = Math.min(m.length - 1, Math.ceil((expHzS * 1.035) / binHz));
+            let e = 0; for (let i = lo; i <= hi; i++) e += m[i] * m[i];
+            return e;
+          };
+          const ePre = bandE(buf.length - back - N5);
+          const ePost = bandE(buf.length - back);
+          stepRatio = ePost / (ePre + 1e-12);
+        }
+      } catch (e) { stepRatio = null; }
+      // 技巧格**整对**都豁免：tech 标记只打在第二个音上，但**拨的那一下（第一个音）也属于技巧格**，
+      // 不能拿"起音台阶"去卡它（技巧是"一次起音 + 按 BPM 等第二个音"的特例路径）。
+      const ntNext = notes[best + 1] || null, ntPrev = notes[best - 1] || null;
+      const inTechPair = !!(exp.tech || (ntNext && ntNext.tech) || (ntPrev && ntPrev.tech));
+      // ── "检测到什么就是什么"的读数（2026-09-23）：不看答案 ──────────────────
+      // 起音前后各 20ms 相减（旧弦的余响被抵掉），在这份"只属于这一下"的谱上取
+      // **最低的那条成串线**（f、2f、3f 都立着）当读数。然后按用户口径：
+      //   和谱面那个音的音分差 **不在 ±80 内就是错**（1 弦格放宽到 ±100；技巧整对豁免）。
+      // ⚠ 这里**不能**用 centsFixed ——它锚在期望音上、窗口只有 ±80，永远报"擦边"，
+      //   那条规则等于没生效（用户实测：弹 1弦3品 仍把 C 和弦全过）。
+      let detCents = null;
+      let detHz = null;
+      try {
+        const srNow4 = (audio.getCtx() && audio.getCtx().sampleRate) || 48000;
+        const back4 = Math.round(((now - onsetAtMs) / 1000) * srNow4);
+        // ⚠ 窗长**不能**用期望音的频率去定（那就等于把"期望音那把尺子"带回来了，
+        //   用户当场指出）。这里用**固定 40ms**：最粗的 6 弦空弦 E2(82Hz) 也有 3.3 个周期，
+        //   而 40ms 相对一个音的时值仍然很短（不会拖进下一个音）。
+        const W4 = Math.round(0.040 * srNow4);
+        // 零填充到 8192：bin 宽从 50Hz（20ms 窗）降到 5.9Hz —— 成串判断才立得住，
+        // 否则 100Hz 那种"伪基频"总能凑出 200/300/400 的谐波（用户导出的 detHz=100 就是这么来的）。
+        const padTo = (src) => {
+          const out = new Float32Array(8192);
+          out.set(src.subarray(0, Math.min(src.length, 8192)));
+          return out;
+        };
+        if (back4 > W4 * 2 && back4 + W4 < buf.length) {
+          const post4 = spectrumOf(padTo(buf.subarray(buf.length - back4, buf.length - back4 + W4)));
+          const pre4 = spectrumOf(padTo(buf.subarray(buf.length - back4 - W4, buf.length - back4)));
+          // 先用"相减谱"（只留抬头的那部分）找成串线；找不到时**退回用起音后那份谱**再找一次
+          // （相减把新音的能量也削掉时，至少还能给一个读数）。
+          let ser = f0SeriesFromDiff(post4, pre4, srNow4, 8192).hz || 0;
+          if (!(ser > 0)) ser = f0SeriesFromDiff(post4, new Float32Array(post4.length), srNow4, 8192).hz || 0;
+          if (!(ser > 0)) {
+            // 最后再退一步：相减谱里若只剩"最低那条还算成串"的线也算（阈值放宽）
+            ser = f0SeriesFromDiff(post4, pre4, srNow4, 8192, 70, 1200, 0.06).hz || 0;
+          }
+          if (ser > 0) {
+            detHz = ser;
+            const expHz4 = 440 * Math.pow(2, (exp.midi + pitchShift() - 69) / 12);
+            detCents = 1200 * Math.log2(ser / expHz4);
+          }
+        }
+      } catch (e) { detCents = null; }
+      // 用户口径（2026-09-23 定版）：**80 太宽，收到 50**。
+      //   读数 = 起音前后各 40ms 相减 + 零填充（不看答案）→ 和谱面那个音比音分；
+      //   不在 ±50 内就是错，不管差 1 品、2 品还是 12 品。
+      //   读数为空（这一下没取到成串线）时退回原来的判定链，不硬判。
+      // 用户口径（2026-09-23 晚，定版）：**容忍度 80**（50 太紧，卡在边界的被误杀）。
+      const detTol = expIsStr1 ? (CFG.detCentsStr1 || 80) : (CFG.detCents || 80);
+      // ⚠ 2026-09-23 修"报错却还能过"：**取不到读数就不算过**。
+      //   用户导出里那些 `detHz = -`（没取到成串线）的行，原来退回老链路 → 全判 ok，
+      //   于是"1弦3品报了错，但照样一路过下去"。按用户口径（不是容忍度内就是错），
+      //   没读数 = 没有"这就是谱面那个音"的证据 → 不算过（技巧整对仍豁免）。
+      // ⚠ 2026-09-23 实测：**取不到读数就不算过**这条会把逐弦的正确演奏一起误杀
+      //   （对 4/1 → 对 0/1）。所以改成：**有读数就按 ±80 判；没有读数退回原来的链路**。
+      //   空读数用"起音后那份谱再找一次"的兜底来减少（见上面的读取块）。
+      // ── 用户定版口径（2026-09-23 晚）：**音名一样就过，不一样就不过** ──────────────
+      //   C4 vs C4 → 过；C4 vs C3（差八度）、C4 vs C#4（差半音）→ 都不过。
+      //   判据 = 检测到的音（不看答案的读数 detHz 归到最近半音）与谱面那个音**同名同八度**。
+      //   （不再用音分容忍度：80 太宽、50 太紧，直接按音名，一步到位。）
+      const detMidi = (detHz && detHz > 0)
+        ? Math.round(69 + 12 * Math.log2(detHz / 440)) : null;
+      const detNameOk = (detMidi == null) ? null : (detMidi === (exp.midi + pitchShift()));
+      // ⚠ 2026-09-24：**读数不再当硬闸门**（用户点头）。
+      //   依据（都是真机数据）：
+      //     · 用户 9-24 导出：43 个起音里 20 个有读数，其中 **19 个是 82~141Hz 的垃圾**；
+      //       唯一那个对的（C4=264Hz）才是例外。1弦1品那 4 次判错，候选重排明明说 F4 对
+      //       （本音失配 84~222、领先 1.10~2.08 倍），全是被 `detOk=false` 一票否决的。
+      //     · 离线 79 个真机样本：现状读数（±40ms 相减 → 成串线）**只对 3 个**。
+      //     · 根因：拨弦那一下最强的是**闷响**，不是音（1弦1品那次：低频 199Hz 幅度 158.6
+      //       vs 真音 349Hz 只有 46.0，3.4 倍），100ms 内才衰减 —— 在起音瞬间读数必然锁到它。
+      //   新口径（= 调研文档 §4 第 3 条）：**判对判错交回候选重排**（本音 vs ±1/±2 品，
+      //   gt-notes 两向 39/39）；读数只用于**显示**，而且不可信时不许显示音名（见 heard 那行）。
+      //   读数要再接回判定，得先换成"稳定段(+50~+220ms) + 按弦分带"那把尺子（离线在单弦集上
+      //   39/39、16/16，但在旋律上只有 7/24，还不够），且它需要起音后 250ms 的音频 ——
+      //   判定发生在 +90ms，取不到，得单独延后取（下一步）。
+      const detOk = true;
+      // 2026-09-23 小步降一档：1.5 → **1.2**。依据：用户导出里一批"音分 ±1~12、几乎完美"
+      // 的音被判错（电平 0.056~0.156），它们全落在"轻音要台阶"这一档里，说明 1.5 太严
+      // （上一根还在响时，前 5ms 窗里已有能量、台阶被压平）。错音那一侧（弹别的音时，
+      // 期望音基频位置的前后比 ≈1.0）在 1.2 这一档仍然过不去。
+      const stepNeed = expIsStr1 ? (CFG.onsetStepMinStr1 || 1.1) : (CFG.onsetStepMin || 1.2);
+      // ⚠ 台阶判据**只在轻音上用**（2026-09-23，用户导出抓到的误杀）：
+      //   导出里 #5/#7/#8 是"期望=听到、电平 0.31~0.34、clarity 0.98"却被判错 ——
+      //   原因就是上一根还在响时，前 5ms 窗里已有能量、台阶被压平 → 又响又准的音过不了。
+      //   而"拿一个错音到处蒙"那种 false accept 全都发生在轻音档（电平 0.05~0.1）。
+      //   所以：**只在轻音时才要求台阶**，响的音不用（它本来就不可能是环境杂音）。
+      const stepNeeded = lv < (CFG.onsetStepQuietMax || 0.12);
+      const stepOk = !stepNeeded || (stepRatio == null) || inTechPair || (stepRatio >= stepNeed);
+      const quietOk = quiet && Math.abs(estP.cents) <= 45
+        && (expIsStr1 || !!(candMatch && candMatch.self && candMatch.self.mismatch < JUDGE.fitMax));
+      // ── 一弦放宽（2026-09-23，按用户 arp 那份导出定的）──────────────────────
+      // 那份导出里唯一的错音是 1弦3品 G4：电平 0.185、clarity 0.925、
+      // **锚定读数 -1.7 音分** —— 量得完全正确，却被候选重排判成错。
+      // ⚠ 2026-09-23：这里给 1 弦加过"锚定读数在 ±45 音分内就放行"（只要求 nHarm ≥ 3），
+      //    已撤 —— 敲桌子是宽频，锚定尺子照样在期望音附近凑出"谐波"，敲一下判对一次。
+      // ── 技巧音（击弦 / 勾弦 / 滑音）单独一把尺子：**扣掉上一个音的偏差再比** ────
+      // 两个音在同一根弦上，琴整体偏高/偏低、左手滑音差一点点，会一起平移。
+      // 真机实测（用户琴整体高 ~50 音分、滑音落点又差 12 音分）：
+      //   · 按绝对音高比 → 读成隔壁半音 D#4 → 判错（用户看到的"滑音不算过"）；
+      //   · 扣掉上一个音的 +54 音分后只差 12 音分 → 判对。
+      // 期望频率 = 上一个音（同一根弦、就在前一个音）实测频率 × 音程。
+      // 容忍度 = 45 + CFG.techExtraCents（技巧额外 40 → 85 音分）：
+      // 真机实测滑音落点常常差半个半音以内；而"弹成隔壁半音"是 100 音分，仍然判错。
+      const techTol = 45 + (CFG.techExtraCents || 0);
+      const prevTech = best > 0 ? notes[best - 1] : null;
+      const techExpectedHz = (exp.tech && techRefHz > 0 && prevTech)
+        ? techRefHz * Math.pow(2, (exp.midi - prevTech.midi) / 12) : 0;
+      const techCentsOff = techExpectedHz > 0 && estP && estP.f0
+        ? 1200 * Math.log2(estP.f0 / techExpectedHz) : null;
+      const techOk = !!(techCentsOff != null && Math.abs(techCentsOff) <= techTol);
+      // ⚠ 2026-09-23 在这里试过两条更严的写法（"候选认出来的音 != 谱面 → 判错"，
+      //    以及只让它约束轻音/1弦两条放宽通道），**都被实测否掉**：
+      //    击弦那一段把弹对的音判错（对 3/错 0 → 对 2/错 1）。
+      //    原因：候选重排在轻音和 1 弦上本来就摇摆（heard 会在期望音和邻居之间跳）。
+      //    "故意弹错却算对"要在**测量层**解决（不看答案的差分测量），不是在这儿加闸门。
+      // ⚠ 2026-09-23 把"按音分判（80/100）"接到这条路上的那次**失败记录**，别再走：
+      //   差分谱万一没有可靠峰（score/nHarm 判不住、或拿到的是退化谱），
+      //   estimateF0Near 照样会吐一个接近 0 的音分数 → `|cents| <= 80` 恒成立 →
+      //   **任何音都判对**（用户实测：1弦1品连弹到底全过；换任何错弦也一路过）。
+      //   所以音分那条口径要落地，**前提是先把"不看答案的测量"做成可靠的**
+      //   （要有可信度判据，拿不到可靠峰时必须报"测不准"，而不是报 0 音分）。
+      // ⚠ 2026-09-23 这里试过"用抬头加权快照量期望音谐波高度"当闸门 —— **实测两种情形都是 0.00**
+      //   （弹错 F4 是 0.00，弹对 A3 也是 0.00：因为余响比新拨那一下还响，快照把台阶一起抹平了），
+      //   会把**弹对的音也判错**。已删。验证脚本：vc_gf/spectrum-ab.mjs（结果见调研文档）。
+      // ⚠ 2026-09-23：按用户要求，把"起音台阶"从**判定**里拿掉（它对真音的误杀太明显：
+      //   同一批"音分只有 ±1~12"的音被判错，电平 0.056~0.156，全落在它管的范围内）。
+      //   ⚠ 测量照旧算、照旧写进导出（step / stepUsed / stepOk），**只是不再参与对错**。
+      // ⚠ 2026-09-24 试过**基频抬头守卫**（"这一下谱面音的基频位置有没有抬头"），
+      //   在带真值的 24 音旋律集上：对 14 → **对 10**（误杀 4 个弹对的），错音测试只从 5 降到 4。
+      //   → **没上线**。原因：rise 是 43ms / 23.4Hz 的逐频点比，对 1 弦那种细而轻的基频不稳，
+      //   拿它当硬闸门就会一刀切。方向没错，但证据得换（见下面"带内新能量占比"那条）。
+      const pass = ((JUDGE_CAND && candMatch
+        // ⚠ **听到的音必须就是谱面那个音（2026-09-23 用户定，第二次强调）**：
+        //   界面上"听到 X"和"期待 Y"不一致（X≠Y）却判过，是最不能接受的 ——
+        //   两个读数自己都摆出来了，还说对，用户只会觉得"根本没在听"。
+        //   所以放行通道（候选重排 / 轻音兜底）统统加上这道前置：
+        //   **不看答案的独立读数（低频带最强线 midiP）必须指向谱面这个音**（容差 1 个半音）。
+        //   技巧音（击弦/勾弦/滑音）不套：它按音程比上一个音，绝对音高校验会误杀（实测）。
+        // ⚠ 2026-09-23 撤掉这里的"听到必须=谱面音"闸门：它用的那个读数
+        //   （低频带最强线 dominantF0InBand）**自带"八度纠正：取低的那一个"**，
+        //   实测经常把 C4 读成 C3、F4 读成 F3 —— 拿它当闸门，真音会被判错、漏音变多
+        //   （用户报"漏得很多"）。判定仍然由候选重排那条路负责（它自己有领先 3% 的要求）。
+        ? (passCand || quietOk)
+        // ⚠ 兜底那条（不用候选重排时）原来只看"锚在期望音上"的音分 —— 那条会自证！
+        //   37 分那两份导出里 12 行"听到 ≠ 期待却判 ok"（期待 A3 听到 A2 也判过）就是它。
+        //   现在同样要求**不看答案的独立读数指向谱面这个音**（技巧音豁免）。
+        : (reliable && Math.abs(centsFixed) <= 75))
+        // ±80 音分（用户口径：不在 80 内就是错）——技巧整对豁免（它按音程比上一个音，
+        // 绝对音分本来就会偏，实测勾弦会被这条误杀：对2 → 对0）。
+        // ⚠ 2026-09-23：这条"不看答案的 ±80"先**不参与判定**（用户口径：回到刚才那版判定，
+        //   新测量只当字段记进导出）。原因：20ms 窗对低音太短，直接上会让合成/低音被误杀。
+        //   读数照算、照写进导出（detCents / serHz），等窗长按频率改好再决定是否启用。
+        || techOk) && detOk
+        // ── §6 第 5 条：**读数与谱面不同名（差 ≥2 个半音）→ 判错** ──────────────
+        // 差 1 个半音不动：读数自己有 ±1 个半音的抖动（两个窗一致也只保证到这一档），
+        // 所以"差一品"仍然交给候选重排（它在 gt-notes 的两向验收里是 39/39）。
+        // 技巧格（击弦/勾弦/滑音）整对豁免：它按"和上一个音的**音程**"比，
+        // 绝对音高那条本来就对不准（实测会把弹对的勾弦判错）。
+        && !(readVeto && !inTechPair);
+      // ── 同一格的多音（双音/三音）：各自判一次（2026-09-23，用户口径）────────────
+      // 这一格同时发声的 2~3 个音**共用同一次起音的频谱窗**，对每个期望音各跑一次判定
+      // （和单音同一把尺子）；**全过才算这一格过**，哪个没过就报出来；
+      // 判错 → 停在原地标红等重弹；判过 → 一次前进过这一整格。
+      const slotLast = slotEndIdx(best);
+      const slotSize = slotLast - best;
+      let slotBad = null;
+      if (slotSize > 1) {
+        // ⚠ 多音格**不能**用单音那把尺子逐个判（2026-09-23，用户报"三音过不去、期待只有一个音"）：
+        //   单音判定会把"别人的谐波"当成"解释不了的峰"扣分 → 三音同时响时每个音单独判都失分。
+        //   改成**成组判**，两件事同时成立才算过：
+        //     ① 解释率：这一格的音能解释掉多少能量（chordOutsiders，和"和弦练习"同一把尺子）；
+        //     ② 逐个存在性：这一格里每个期望音，各自那串谐波要立得住（harmonicity ≥ 2.0）。
+        //   缺哪个就报哪个；有解释不了的多余强峰（①不达标）就报"这一格多了音/有杂音"。
+        const groupMidis = notes.slice(best, slotLast).map((n) => n.midi + pitchShift());
+        let ratio = 0;
+        try { ratio = chordOutsiders(novel, sr2, a.fftN, groupMidis).ratio; } catch (e) { ratio = 0; }
+        let weakest = null, weakestHnr = Infinity;
+        for (let k = best; k < slotLast; k++) {
+          const hz = 440 * Math.pow(2, (notes[k].midi + pitchShift() - 69) / 12);
+          let h = 0;
+          try { h = harmonicity(spec, peakRate, PEAK_N, hz); } catch (e) { h = 0; }
+          if (h < weakestHnr) { weakestHnr = h; weakest = notes[k]; }
+        }
+        const ratioOk = ratio >= 0.7;              // 和"和弦练习"同一个门限
+        const presentOk = weakestHnr >= 2.0;       // 每个音自己那串谐波要立着
+        if (!presentOk) slotBad = weakest;
+        else if (!ratioOk) {
+          slotBad = { midi: exp.midi, string: exp.string, fret: exp.fret, extra: true };
+        }
+      }
+      const passSlot = pass && !slotBad;
       // 判"错"之后要说出**用户弹的是哪个音**。问题：上面那把尺子是在"谱面那个音"的
       // 谐波位置上找峰的（±60 音分），真弹成隔壁半音时真谐波落在范围外，读数会被拉回来
       // —— 实测真弹 D#4 读成 -59 音分（指向 C#4，方向还反了）。
@@ -1476,6 +2235,12 @@ function micTickBody() {
           const wC = wide.cents - tuning;
           if (Math.abs(wC) <= 250) { seenMidi = Math.round(69 + 12 * Math.log2(wide.f0 / 440) - tuning / 100); seenCents = wC; }
         }
+      }
+      // §6 的读数说"这一下不是谱面那个音"时，报错就按**它**说 —— 显示必须和判定同一个结论
+      // （它量的是"起音这一下新加进来的那条线"，不是锚在谱面音上找出来的读数）。
+      if (readConf && readVeto && readHz > 0) {
+        seenMidi = readMidi;
+        seenCents = 1200 * Math.log2(readHz / (440 * Math.pow(2, (exp.midi + pitchShift() - 69) / 12)));
       }
       // 认出来的邻居和谱面这个音撞名了（取整可能撞上）：这时不能说"要 G3、你弹的是 G3"，
       // 改成说"偏得比较多"。
@@ -1502,6 +2267,16 @@ function micTickBody() {
       // 两者的差就是"这一段到底量得准不准"的直接证据。
       const centsP = estP.cents;
       const midiP = nearMidi;
+      // ── 轻音兜底（2026-09-23 修正）──────────────────────────────────────────
+      // 原来：电平 < 0.06 且"锚在期望音上"的读数在 ±45 音分内 → 直接放行。
+      // ⚠ 那把锚定读数天然自证（它在期望音附近找峰，弹错也能找到东西），
+      //   所以**1 弦一弹就过**（1 弦最细最轻，电平天生落在 0.05~0.09，正踩这条通道），
+      //   用户实测"只要弹 1 弦就能一直往下走"，就是这条造成的。
+      // 现在加一条**不看答案的校验**：独立读数（低频带最强线 midiP，不锚期望音）
+      // 必须也指向谱面这个音，否则这条通道不成立。
+      // 容差先给 1 个半音（独立读数本身也会抖）；要更严就改成 0 —— 见铁律的"一次只动一档"。
+      // （heardIsExpected / quietOk 已经在上面定义好了，这里不再重复声明 ——
+      //   同一作用域里重复 const 会直接语法错。）
       const prevIdx = best - 1;
       const prevLog = prevIdx >= 0 ? notes[prevIdx] : null;
       sessionLog.push({
@@ -1517,6 +2292,12 @@ function micTickBody() {
         lit: useDiff ? 'diff' : 'snap',
         dCents: estDiff && estDiff.score > 0 ? Number(estDiff.cents.toFixed(1)) : null,
         dHz: estDiff && estDiff.score > 0 ? Math.round(estDiff.f0) : null,
+        // §6「起音即读数」：两个锚定窗各读到什么、采信了没有、和谱面差几个半音
+        readHz: readHz ? Math.round(readHz) : null,
+        readHz2: readHz2 ? Math.round(readHz2) : null,
+        readMidi: readConf ? readMidi : null,
+        readSemis: readConf ? readSemis : null,
+        readVeto: !!readVeto,
         // 候选重排这一路的证据：挑出来的音、本音失配、本音相对最强对手的领先倍数
         cand: candBest ? midiToNameOf(candBest.midi) : null,
         // 低八度守卫的证据：期望音判过时，若"低一个八度"明显更像，会被判错并记在这里
@@ -1546,6 +2327,27 @@ function micTickBody() {
           judgedAs: midiToNameOf(exp.midi), result: pass ? 'ok' : (unclear ? 'unclear' : 'bad'),
           measured: midiToNameOf(midiP), cents: Number(centsP.toFixed(1)),
           clarity: Number(clar.toFixed(3)), nHarm: estP.nHarm ?? 0,
+          // ── 判定证据（2026-09-23 加）──────────────────────────────────────────
+          // 用户报"听到的和期待的一致却判错"，但导出里看不到是**哪条判据**否决的。
+          // 这几个字段就是全部线索：候选重排的失配/领先倍数、轻音兜底、起音台阶、是否 1 弦格。
+          // 下一次导出直接看这些，不用再猜。
+          candFit: candSelf ? Number(candSelf.mismatch.toFixed(0)) : null,
+          candMargin: (candSelf && candRival && candRival.score > 0)
+            ? Number((candSelf.score / candRival.score).toFixed(3)) : null,
+          passCand: !!passCand, quietOk: !!quietOk, str1: !!expIsStr1,
+          step: stepRatio == null ? null : Number(stepRatio.toFixed(2)),
+          stepUsed: !!stepNeeded, stepOk: !!stepOk,
+          // 不看答案的读数（2026-09-23 新增字段）：起音前后各 20ms 相减 → 最低成串线
+          // 当读数，再算它离谱面那个音多少音分。**只记录、不参与判定**，
+          // 用来回答"到底检测成了什么音、差多少音分"。
+          detCents: detCents == null ? null : Number(detCents.toFixed(1)),
+          detHz: detHz == null ? null : Math.round(detHz),
+          // §6 的读数（两个锚定窗 + 采信结论）——排查"为什么这一下判错"靠这几列
+          readHz: readHz ? Math.round(readHz) : null,
+          readHz2: readHz2 ? Math.round(readHz2) : null,
+          readMidi: readConf ? readMidi : null,
+          readSemis: readConf ? readSemis : null,
+          readVeto: !!readVeto,
         });
       }
       if (globalThis.__vcSession) globalThis.__vcSession.push({ no: best + 1, exp: exp.midi, f0: hz });
@@ -1557,26 +2359,59 @@ function micTickBody() {
       }
       // 听到的到底是哪个音（跟调音器一样的读数）
       // 候选重排说"你弹的是别的音"时，直接把那个音写出来（它比锚在本音上的读数可信）
-      $('heard').textContent = candBest && candBest.offset !== 0
-        ? `${midiToNameOf(candBest.midi)}（谱面要 ${midiToNameOf(exp.midi)}）`
-        : `${midiToNameOf(midiP)} ${centsP > 0 ? '+' : ''}${Math.round(centsP)}音分`;
-      if (pass) good++; else if (!unclear) bad++;
-      markNote(best, pass ? 'ok' : (unclear ? 'unclear' : 'bad'));   // 谱面上标对错
-      setVerdict(pass
-        ? `✓ ${midiToNameOf(exp.midi)}${timKind ? `（${timKind === 'early' ? '抢拍' : '拖拍'} ${timStr}）` : (timStr ? `（${timStr}）` : '')}`
+      // ⚠ 显示必须**和判定用同一个结论**（2026-09-23，用户报"每个音都显示正确、
+      //   下面那行文字却一直显示没匹配上"）：原来"候选说就是谱面这个音"时，
+      //   这里显示的是**另一把读数**（低频带最强线 midiP）—— 那把读数经常差半音，
+      //   于是文字说"听到 X"、判定说"对"，看起来自相矛盾。
+      //   现在：候选认定是谱面这个音时，就直接显示谱面这个音（加音分偏差）；
+      //   候选认定是别的音（offset≠0）时，显示候选认出来的那个音 —— 判定怎么判的，屏幕就怎么说。
+      // 显示也用**检测到的那个音名**（用户口径：音名一样就过）——这样"显示什么就按什么判"，
+      // 不会再出现"显示同一个音名却不给过"的自相矛盾。
+      // ⚠ 2026-09-24：**读数不可信就不显示它**。原来"读数非空就显示"，于是出现
+      //   "听到 F2（谱面要 F4）"这种 —— 那个 F2 是拨弦的低频闷响，不是音；
+      //   用户看到的就是"音准听错了"，而且紧接着就被判错。
+      //   现在只有"读数 == 谱面这个音"时才拿它当显示依据（那时它至少不会骗人）；
+      //   不一致就按**候选重排的结论**说 —— 显示和判定保持同一个结论。
+      const detTrusted = (detMidi != null) && (detMidi === (exp.midi + pitchShift()));
+      $('heard').textContent = detTrusted
+        ? `${midiToNameOf(detMidi)}（和谱面一致）`
+        : ((candBest && candBest.offset !== 0)
+          ? `${midiToNameOf(candBest.midi)}（谱面要 ${midiToNameOf(exp.midi)}）`
+          : `${midiToNameOf(exp.midi + pitchShift())} ${centsP > 0 ? '+' : ''}${Math.round(centsP)}音分`);
+      // 同一个音只记第一次错（用户口径）：停了重弹的那几次不再累加错误数，
+      // 否则一声咳嗽 / 一次听不准就能把错误数刷到十几。
+      const firstWrong = !passSlot && !unclear && !wrongNoted.has(best);
+      // 跟节拍的总时间账：第一个被认到的音 → 最后一个判完的音
+      if (firstJudgeMs == null) firstJudgeMs = onsetAtMs;
+      lastJudgeMs = onsetAtMs;
+      if (passSlot) good++;
+      else if (firstWrong) { bad++; wrongNoted.add(best); }
+      markNote(best, passSlot ? 'ok' : (unclear ? 'unclear' : 'bad'));   // 谱面上标对错
+      setVerdict(passSlot
+        ? (slotSize > 1
+          ? `✓ ${notes.slice(best, slotLast).map((n) => midiToNameOf(n.midi)).join(' + ')}（${slotSize} 个音都对）`
+          : `✓ ${midiToNameOf(exp.midi)}${timKind ? `（${timKind === 'early' ? '抢拍' : '拖拍'} ${timStr}）` : (timStr ? `（${timStr}）` : '')}`)
         : (unclear
           ? `? 这一处没听清（量到 ${midiToNameOf(midiP)}${timStr ? `，${timStr}` : ''}），继续`
           // "约"不是客气：认音名用的是宽搜索的尺子，判"不是谱面这个音"很稳，
           // 但具体是哪个邻居、偏高还是偏低会被上一个音和重叠谐波带偏（合成用例里
           // 真弹 D#4 会被认成 C#4 附近）—— 所以说"约"，不把话说死。
           : (seenSame
-            ? `✗ 谱面要 ${midiToNameOf(exp.midi)}，这一处偏得比较多（${Math.round(seenCents)} 音分${timStr ? `，${timStr}` : ''}），继续`
-            : `✗ 谱面要 ${midiToNameOf(exp.midi)}，你弹的是 约${midiToNameOf(seenMidi)}${timStr ? `（${timStr}）` : ''}，继续`)),
-        pass ? 'ok' : (unclear ? '' : 'bad'));
+            ? `✗ 谱面要 ${midiToNameOf(exp.midi)}，这一处偏得比较多（${Math.round(seenCents)} 音分${timStr ? `，${timStr}` : ''}）—— 停在这里，重弹这一个`
+            : (slotBad
+              ? (slotBad.extra
+                // 解释率不够：这一格里有它解释不了的能量（多弹了别的音 / 有杂音）
+                ? `✗ 这一格要 ${notes.slice(best, slotLast).map((n) => midiToNameOf(n.midi)).join(' + ')}，但里面混进了多余的声音 —— 停在这里，重弹这一格`
+              // 双音/三音：说清是哪一个音没听到（这一格要 X+Y+Z）
+                : `✗ 这一格要 ${notes.slice(best, slotLast).map((n) => midiToNameOf(n.midi)).join(' + ')}，**${midiToNameOf(slotBad.midi)}（${slotBad.string}弦${slotBad.fret}品）没听到** —— 停在这里，重弹这一格`)
+              : `✗ 谱面要 ${midiToNameOf(exp.midi)}，你弹的是 约${midiToNameOf(seenMidi)}${timStr ? `（${timStr}）` : ''} —— 停在这里，重弹这一个`))),
+        passSlot ? 'ok' : (unclear ? '' : 'bad'));
       // 错音标记：先记账再往下走 —— advanceNote() 会在最后一个音上收尾并出总结，
       // 记账排在它后面的话，最后一个音的错误就进不了总结里的"要改的地方"。
-      if (!pass && !unclear) {
-        wrongList.push(seenSame
+      if (!passSlot && !unclear) {
+        if (firstWrong) wrongList.push(slotBad
+          ? `第${(exp.measure || 0) + 1}小节 这一格少/错了 ${midiToNameOf(slotBad.midi)}`
+          : seenSame
           ? `第${(exp.measure || 0) + 1}小节 ${midiToNameOf(exp.midi)} 偏得比较多`
           : `第${(exp.measure || 0) + 1}小节 弹成约${midiToNameOf(seenMidi)}（要${midiToNameOf(exp.midi)}）`);
         $('wrongs').textContent = '弹错：' + wrongList.join('、');
@@ -1597,14 +2432,13 @@ function micTickBody() {
             + ` 听到 ${heardName} ${centsP > 0 ? '+' : ''}${Math.round(centsP)}音分 → ${pass ? '对' : '错'}`);
         }
       }
-      if (modeKind === 'tempo') {
-        // 跟节拍：判完只标记这个音，光标/时间轴继续按时钟走（不推进 noteIdx）
-        // 记状态；超窗但音对（lateAccept）→ 这一层会把时间轴重新对齐到这一下
-        // （用户口径"跟得上比掐得准重要"：一漏一路漏、越弹越乱才是最大的问题）
-        tempo().onJudged(best, pass, devMs);
-      } else {
-        advanceNote();
-      }
+      // ── 弹错停下重弹（2026-09-23，用户口径："弹错停下重弹是对的"）──────────
+      // 判过才往下走；判错**停在原地**，等他重弹这一个 —— 光标不再往前预览。
+      // 这样环境里的杂音（旁边的说话、咳嗽）最多让你重弹一次，
+      // 不会把后面整条对号顶错位（"弹快一点就跟不上"的根也在这儿）。
+      // 判过 → 一次前进过**整格**（双音/三音一次拨弦就过这一格）；判错停在原地
+      if (passSlot) { for (let k = 0; k < slotSize; k++) advanceNote(); }
+      else highlightCurrent();
       if (api && exp.t != null) api.timePosition = (exp.t + (exp.dur || 0)) * 1000;
     }
     $('good').textContent = good;
@@ -1653,8 +2487,35 @@ function finishSession() {
     timLine = `　节奏：偏差中位 ${med >= 0 ? '+' : ''}${med}ms／最大 ${Math.round(abs[abs.length - 1])}ms`
       + `，抢拍 ${earlyCount} 处、拖拍 ${lateCount} 处（容许 ±${Math.round(timingTolMs)}ms）`;
   }
-  setVerdict(head + todo + timLine, ok ? 'ok' : 'bad');
+  // 跟节拍的总时间账（2026-09-23，用户口径）：**第一个音到最后一个音**的用时，
+  // 和谱面应有的时长比，容忍 ±10s。停了/拖了会累加在这上面。
+  let totalLine = '';
+  if (modeKind === 'tempo' && firstJudgeMs != null && lastJudgeMs != null && notes && notes.length > 1) {
+    const userSec = (lastJudgeMs - firstJudgeMs) / 1000;
+    const scoreSec = notes[notes.length - 1].t - notes[0].t;
+    const diff = userSec - scoreSec;
+    // ⚠ 2026-09-24（用户报"全弹快没有提示"）：总时间账从"±10 秒"改成**比例**。
+    //   为什么：原来 ±10s 是绝对值 —— 30 秒的段落你整体快 20%（−6s）照样"过关"，
+    //   于是"全弹快"什么都不会报。改成按**比例**判：|差| ≤ 谱面时长的 15% 才算过。
+    const tolSec = Math.max(CFG.tempoTotalTolSec || 0, scoreSec * (CFG.tempoTotalTolPct || 0.15));
+    const pct = scoreSec > 0 ? (diff / scoreSec) * 100 : 0;
+    totalLine = `　总时间：你用了 ${userSec.toFixed(1)}s ／ 谱面 ${scoreSec.toFixed(1)}s`
+      + `（整体${diff >= 0 ? '慢' : '快'} ${Math.abs(pct).toFixed(0)}%）`
+      + `，差 ${diff >= 0 ? '+' : ''}${diff.toFixed(1)}s（容忍 ±${tolSec.toFixed(1)}s = 谱面的 15%）`
+      + `${Math.abs(diff) <= tolSec ? ' → 时间这关过了' : ' → 时间这关没过（整体太快或太慢）'}`;
+  }
+  setVerdict(head + todo + timLine + totalLine, ok ? 'ok' : 'bad');
   $('next').innerHTML = '想再练一遍？直接再点一次「跟弹」（或点谱面上任意一个音从那开始）。';
+}
+
+// 这一格到哪（不含）：**同一时刻发声的音算一格**（双音/三音），容差 2ms。
+// 时间轴里同一槽位的音 t 是同一个数（gp_timeline.py 算出来的），所以直接按 t 比。
+function slotEndIdx(i) {
+  if (!notes || !notes[i]) return i + 1;
+  const t0 = notes[i].t;
+  let k = i + 1;
+  while (k < notes.length && Math.abs(notes[k].t - t0) <= 0.002) k++;
+  return k;
 }
 
 function advanceNote() {
@@ -1667,8 +2528,15 @@ function advanceNote() {
   const same = !!(nextN && prevNote && nextN.midi === prevNote.midi);
   // ⚠ 这一条也回退了：2026-09-22 晚试过"从拨弦那一刻算"（想缩聋期，帮快音），
   // 用户实测"有些音弹对判错、偶尔还漏"——从判定那一刻算（下面这行）保守但准。
+  // ⚠ 2026-09-23 治"快弹漏音"：用户导出里 nearMiss 的主因是**"冷却中"**（67/120 条）——
+  //   判定完一个音之后的静默期太长，把后面的真起音挡在门外。
+  //   按**谱面间距**分档：快段落（间隔 ≤250ms）冷却上限收到 85ms（原来 160ms），
+  //   慢段落维持原样（间隔大本来就不会被挡）。
+  const fastRun = gapMs <= 250;
   refractoryUntilMs = performance.now()
-    + Math.min(160, Math.max(same ? 55 : 70, gapMs * (same ? 0.35 : 0.55)));
+    + (fastRun
+      ? Math.min(85, Math.max(same ? 45 : 60, gapMs * 0.30))
+      : Math.min(160, Math.max(same ? 55 : 70, gapMs * (same ? 0.35 : 0.55))));
   // 不设延音期：谱面的延音只是"这个音响得久"，不代表你要再弹一次，
   // 也不代表接下来不能判定。判定只跟"你拨了几下"有关。
   noteIdx++;
@@ -1681,7 +2549,23 @@ function advanceNote() {
   }
   highlightCurrent();
   const nx = notes[noteIdx];
-  if (nx) $('next').innerHTML = `下一个：<b>${midiToNameOf(nx.midi)}</b>（${nx.string}弦 ${nx.fret}品）`;
+  // ── 技巧：下一个音如果带 tech 标记，就在谱面该响的时刻自动判定它 ────────────
+  // 只有一个起音（拨/击/滑的那一下），第二个音靠音高确认 —— 不再要求第二次起音。
+  techDueMs = 0;
+  if (nx && nx.tech) {
+    // 采样时刻：按谱面间距，但每个技巧有"至少等这么久"的下限 ——
+    // 真机实测落地时间：击弦/勾弦约 170ms、滑音约 270~350ms（滑音是连续爬音，
+    // 采样太早会量到"滑到一半"的音，判成错音）。
+    const techMin = nx.tech === 'slide' ? 520 : 250;
+    const dtMs = Math.max(0, (nx.t - (notes[noteIdx - 1] || nx).t) * 1000);
+    const at = onsetAtMs + Math.max(techMin, Math.min(700, dtMs));
+    techDueMs = Math.max(performance.now() + 40, at);
+    techRefHz = (typeof lastJudgeHz === 'number' && lastJudgeHz > 40) ? lastJudgeHz : 0;
+    $('next').innerHTML = `下一个：<b>${midiToNameOf(nx.midi)}</b>（${nx.string}弦 ${nx.fret}品）`
+      + `　<span style="color:#7fd">技巧音：${({ hammer: '击弦', pull: '勾弦', slide: '滑音' })[nx.tech] || nx.tech}，不用再拨</span>`;
+  } else if (nx) {
+    $('next').innerHTML = `下一个：<b>${midiToNameOf(nx.midi)}</b>（${nx.string}弦 ${nx.fret}品）`;
+  }
 }
 
 async function startMic() {
@@ -1690,6 +2574,7 @@ async function startMic() {
   }
   resetAnalysis();
   frames = 0; floor = 0.001; levelHist = []; lastOnsetMs = -1e9;
+  techDueMs = 0;                  // 上一轮残留的技巧时刻不能带进这一遍
   good = 0; bad = 0; rise = null;
   // 变调夹 / BPM 在开弹这一刻读一次（设置面板里改了立刻生效）
   capo = Math.max(0, Math.min(6, Number($('capo') && $('capo').value) || 0));
@@ -1702,6 +2587,7 @@ async function startMic() {
   //     这条以前是坏的：点哪个音都对不上，因为"光标那份谱面格子"和"判定那份清单"
   //     错开了一位（117 vs 118）。现在两边是同一份清单（buildTickMap → mapSequenceToSlots，
   //     点第几格就是第几个音），而且跟弹进行中点谱面**不会再偷偷改起点**（见 beatMouseDown）。
+  wrongList = []; wrongNoted = new Set();
   if (!userPickedStart || !(noteIdx >= 0 && noteIdx < (notes || []).length)) noteIdx = 0;
   userPickedStart = false;         // 只认"这一次点击"，下一遍仍旧从头
   if (notes && notes[noteIdx] && $('next')) {
@@ -1724,7 +2610,8 @@ async function startMic() {
   alignOffsetSec = null;
   micStartedAt = performance.now();
   $('good').textContent = '0'; $('bad').textContent = '0';
-  if (songKind === 'heyjude' || songKind === 'arp') await loadNotes();
+  // 真实谱面（登记表里的：Hey Jude / 茉莉花 …）+ 两个测试页都要装时间轴
+  if (scoreOf(songKind) || songKind === 'arp' || songKind === 'tech') await loadNotes();
   // 跟节拍：每次开始都清空状态（每个音先记成"待判"）
   tempo().reset();
   resetDiag();
@@ -1765,7 +2652,9 @@ async function startMic() {
   // 跟节拍模式用"音符提示音"（scheduleTempoClicks，和光标同一个时钟）；
   // 四分音符节拍器只在"等我弹"模式下用 —— 两个一起响会打架，而且跟节拍时
   // 用户要的是"光标走到哪响到哪"，不是抽象的拍子。
-  if ($('metro') && $('metro').checked && modeKind !== 'tempo') startMetronome();
+  // 节拍器 = 独立开关（2026-09-23）：跟节拍模式下也由它自己出声，
+  // 只当参考、不参与判定（判定已经改成音驱动 + 总时间对账）。
+  if ($('metro') && $('metro').checked) startMetronome();
   $('mic').textContent = '⏹ 停止';
   $('mic').classList.add('on');
   setVerdict(`准备 —— 四拍后开始（${userBpm} BPM），弹错不停。`);
@@ -1846,6 +2735,11 @@ const blob = new Blob([JSON.stringify({
   bpm: userBpm,
   align: alignInfo,          // 谱面 × 时间轴的对齐结论（对不上时这里能看出来）
   notes: sessionLog, onsets: onsetLog,
+  // ── 近似帧日志（2026-09-23 加，治"快弹漏音"）─────────────────────────────────
+  // 用户说"确定是检测没起来"。这一份把**没被认成起音、但电平已经过了门限**的那些帧记下来，
+  // 带上它被哪条判据否决（why）和当时的量（电平/涨速/形状/频带抬头）。
+  // 快弹一段导出后，看这份就能直接指出"这一下卡在不够陡 / 没有新拨的迹象 / 形状没变"。
+  nearMiss: nearMissLog,
 }, null, 1)],
     { type: 'application/json' });
   const a = document.createElement('a');
@@ -1870,3 +2764,8 @@ $('selftest').onclick = async () => {
   if (api && api.score) lines.push(`已解析：${api.score.title}，${api.score.tracks.length} 个声部，${api.score.masterBars.length} 小节`);
   err('自检 → ' + lines.join(' ｜ '));
 };
+
+// ── 启动完成标记（写在文件最后 = 所有按钮/处理器都挂好了）───────────────────
+// index.html 里的自检条靠它判断："页面脚本起没起来"。
+// 只改 import 一行、模块图断掉时，这里根本到不了 → 手机上会直接把原因显示出来。
+globalThis.__gfBooted = true;

@@ -34,7 +34,7 @@ input[type=number] { width:72px; text-align:right; }
 
 /* 谱面：页面的大头 */
 main { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; padding:8px 8px 0; }
-#scoreWrap { flex:1 1 auto; min-height:0; overflow:auto; -webkit-overflow-scrolling:touch;
+#scoreWrap { position:relative; flex:1 1 auto; min-height:0; overflow:auto; -webkit-overflow-scrolling:touch;
   background:var(--card); border:1px solid var(--line); border-radius:14px; padding:6px 4px 12px;
   box-shadow:0 1px 4px rgba(0,0,0,.04); }
 #score { width:100%; min-width:0; position:relative; }
@@ -94,10 +94,12 @@ main { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; padding
 <div id="settings">
   <select id="song" aria-label="曲目">
     <option value="heyjude">Hey Jude（真实谱面）</option>
+    <option value="jasmine">茉莉花（真实谱面）</option>
     <option value="chords">和弦练习（C–Am–F–G）</option>
     <!-- 无谱面测试：只用"音格子"显示当前该弹哪个音（第几弦第几品）。
          用来测"和弦谱（非扫弦）也当单音判"：逐音能不能过 / 弹错会不会提示 / T4231323 会不会报错。 -->
     <option value="arp">C–Am–F–G · T3231323（逐音测试）</option>
+    <option value="tech">技巧练习（击弦 / 勾弦 / 滑音）</option>
   </select>
   <select id="track" aria-label="声部"></select>
   <select id="mode" aria-label="模式">
@@ -128,7 +130,11 @@ main { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; padding
 </div>
 
 <main>
-  <div id="scoreWrap"><div id="score"><div id="marks"></div><div id="cursor"></div></div></div>
+  <!-- ⚠ 光标/标记必须放在 #score **外面**（2026-09-23 用户报"一个光标都显示不出来"）：
+       alphaTab 渲染时会重写它自己那个容器（#score）的内容，放在里面的 div 会被删掉，
+       于是 getElementById('cursor') 取不到元素、光标和 ✓✗ 标记全都画不出来。
+       现在它们和 #score 平级、绝对定位在 #scoreWrap 上（#scoreWrap 已改成 position:relative）。 -->
+  <div id="scoreWrap"><div id="score"></div><div id="marks"></div><div id="cursor"></div></div>
   <div id="chords"></div>
   <div id="cells"></div>
   <div class="hud">
@@ -149,7 +155,46 @@ main { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; padding
 </main>
 
 <script src="./vendor/alphaTab.min.js"></script>
-<script type="module" src="./js/follow-score.js"></script>
+<!-- 启动自检（普通脚本，模块之前跑）：手机上没控制台，页面脚本起不来时必须把原因显示出来。
+     ?v= 跟页面里的 BUILD 保持一致：手机浏览器会缓存 ES 模块，只改代码不换地址会出现
+     "新的调用方 + 旧的实现"→ 模块图断掉 → 顶栏出来了、谱面空白、按钮全点不动。 -->
+<div id="boot" style="display:none;margin:8px 10px;padding:8px 10px;border-radius:6px;
+     background:#3a1010;color:#ffd7d7;font:13px/1.5 system-ui;word-break:break-all">
+  <b>页面脚本没启动</b><br><span id="bootmsg"></span>
+  <div style="margin-top:6px;color:#ffe9b0">把上面这行连同地址栏的网址一起截图发我，就知道是哪一步断的。</div>
+</div>
+<script>
+  window.__gfBooted = false;
+  window.__gfBootErr = function (msg) {
+    var box = document.getElementById('boot'), m = document.getElementById('bootmsg');
+    if (box) { box.style.display = 'block'; }
+    if (m) { m.textContent = msg; }
+    try { var e = document.getElementById('err'); if (e) { e.textContent = msg; } } catch (x) {}
+  };
+  // 模块里抛的错、或没接住的 Promise 错误，也捞出来
+  window.addEventListener('error', function (e) {
+    if (window.__gfBooted) return;
+    window.__gfBootErr('脚本错误：' + (e.message || e.type) + '　@' + (e.filename || '') + ':' + (e.lineno || ''));
+  }, true);
+  window.addEventListener('unhandledrejection', function (e) {
+    if (window.__gfBooted) return;
+    var r = e && e.reason;
+    window.__gfBootErr('未处理的错误：' + ((r && r.message) || r));
+  });
+  // 5 秒还没启动就说出来（模块 404 / MIME 不对 / 被中间层改坏，都会走这里）
+  setTimeout(function () {
+    if (!window.__gfBooted) {
+      window.__gfBootErr('等了 5 秒，页面脚本还是没有启动 —— 多半是模块没下载成功（地址被中间层或缓存改过）。'
+        + '　地址：' + location.href);
+    }
+  }, 5000);
+</script>
+<!-- 用 import() 拿模块：失败时能拿到**具体原因**（静态 src 只会静默失败） -->
+<script type="module">
+  import('./js/follow-score.js?v=0924-1725').catch(function (e) {
+    window.__gfBootErr('模块加载失败：' + ((e && e.message) || e));
+  });
+</script>
 <script>
   // 设置面板显隐
   document.getElementById('gear').onclick = () => {

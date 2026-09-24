@@ -5,7 +5,7 @@
 // 以及查询权限状态。不掺任何判定逻辑，也不认识界面。
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { CAPTURE, MIC_TIMEOUT_MS } from './engine/config.js';
+import { CAPTURE, MIC_TIMEOUT_MS } from './engine/config.js?v=0924-1725';
 
 let audioCtx = null;
 let analyser = null;

@@ -16,6 +16,22 @@ const pr = Number(process.env.VC_PASS_RATIO || 0);
 if (pr) globalThis.__passRatio = pr;
 // 判定用哪一份谱：差分谱（默认）还是老的起音快照。A/B 对照用。
 if (process.env.VC_JUDGE_DIFF != null) globalThis.__judgeDiff = Number(process.env.VC_JUDGE_DIFF);
+// VC_NOPREV=1：对照用 —— 关掉"上一音余响剔除 + 抬头加权"（默认开）
+if (process.env.VC_NOPREV) globalThis.__noPrev = 1;
+// VC_ONDIFF=1：判定输入换成"这一下的差分谱"（起音前后各 40ms 相减），对照用
+if (process.env.VC_ONDIFF) globalThis.__judgeOnDiff = 1;
+// VC_ATTACKDIFF=1：判定输入换成"以起音采样点为中心的前后短窗差分"
+if (process.env.VC_ATTACKDIFF) globalThis.__judgeAttackDiff = 1;
+// 阈值扫描（只影响判定层的两个门槛）：VC_FIT=230 VC_MARGIN=1.05
+if (process.env.VC_FIT) globalThis.__fitMax = Number(process.env.VC_FIT);
+if (process.env.VC_MARGIN) globalThis.__rivalMargin = Number(process.env.VC_MARGIN);
+// 判定输入的诊断开关（2026-09-24）：把 engine 里已有的"抬头加权 / 剔除上一音余响"接上看数字
+if (process.env.VC_JUDGE_RISE) globalThis.__judgeRise = 1;
+if (process.env.VC_JUDGE_PREV) globalThis.__judgePrev = 1;
+// §6「起音即读数」：VC_JUDGE_READ=1 打开；VC_READ_GATE=off|b2|b5；VC_READ_VETO=几个半音才判错
+if (process.env.VC_JUDGE_READ) globalThis.__judgeRead = 1;
+if (process.env.VC_READ_GATE) globalThis.__readGate = process.env.VC_READ_GATE;
+if (process.env.VC_READ_VETO) globalThis.__readVeto = Number(process.env.VC_READ_VETO);
 console.log(`音频 ${file}：${(AUDIO.length / SR).toFixed(1)}s`);
 
 let clock = 0;

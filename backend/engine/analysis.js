@@ -21,6 +21,9 @@ let bgSpec = null;         // 逐频点"已经在那儿的能量"（余响会被
 let lastMagsFull = null;   // 最近一次整窗频谱（和判定用的那一份等长），起音时当差分基准
 let lastFluxRise = null;   // 逐频点抬头率：当前帧/上一帧，用来分辨"新的"和"还在衰减的"
 let prevRiseSpec = null;   // 抬头率用的"上一帧短窗"频谱
+let prevHfRiseSpec = null; // 高频抬头率用的"上一帧短窗"频谱
+let hfBandHist = [];       // 最近几帧的 2kHz+ 频带能量（看"比自己几帧前涨了几倍"）
+let lowBandHist = [];      // 最近几帧的 150~600Hz（基频区）能量
 const RISE_N = 512;        // 抬头率的窗长：10.7ms @48k（必须短，理由见 fluxRelOf）
 
 export function resetAnalysis() {
@@ -33,6 +36,9 @@ export function resetAnalysis() {
   prevShapeSpec = null;      // 换一轮之后不能拿上一轮的频谱形状当基准
   prevHfSpec = null;
   prevRiseSpec = null;
+  prevHfRiseSpec = null;
+  hfBandHist = [];
+  lowBandHist = [];
 }
 
 // ── 逐频点本底：把"已经在那儿的能量"吸进去，剩下的就是新出现的 ──────────────
@@ -262,14 +268,26 @@ function centsBetween(hzA, hzB) {
 // 而且噪声峰天然排在真正的谐波峰后面。N 取 12，和"最多看 10 次谐波"配得上。
 const MAX_PEAKS = 12;
 
-function observedPeaks(novel, count = MAX_PEAKS) {
+function observedPeaks(novel, count = MAX_PEAKS, rise = null, riseBinHz = 0, binHz = 0) {
   const cands = [];
   for (let i = 1; i < novel.length - 1; i++) {
     const v = novel[i];
     if (v > novel[i - 1] && v >= novel[i + 1]) cands.push({ bin: i, mag: v });
   }
   cands.sort((a, b) => b.mag - a.mag);
-  return cands.slice(0, count);
+  const out = cands.slice(0, count);
+  // ⚠ 2026-09-24：给每个峰标一个"**新不新**"（fresh 0~1）——来自起音那一刻的逐频点抬头比
+  //   （43ms 两帧相除，页面里早就算好了；estimateF0ByPeaks 的 opts.rise 用的是同一个量）。
+  //   为什么：上一个音还在响时，它的谐波在判定窗里是**强峰**，但它们**不抬头**
+  //   （r ≤ 1 → fresh = 0）。这些峰不该在 O2P 里罚任何候选 —— 否则"解释不了的峰"
+  //   会把弹对的音罚到"没证据"那一档（实测：3弦2品 A3 被罚到 286，候选滑到 G3）。
+  if (rise && riseBinHz > 0 && binHz > 0) {
+    for (const p of out) {
+      const j = Math.round((p.bin * binHz) / riseBinHz);
+      p.fresh = (j >= 1 && j < rise.length) ? Math.max(0, Math.min(1, rise[j] - 1)) : 1;
+    }
+  }
+  return out;
 }
 
 // 试过在挑峰时按"新度"（novel/(novel+本底)）过滤，想直接排除还在响的那根弦。
@@ -283,7 +301,7 @@ function observedPeaks(novel, count = MAX_PEAKS) {
 // "谱上这个音，在它自己的时间片里出现了没有"（闭集验证），
 // 并且候选只用时间轴上真正可能的那几个（不再放 ±5、±12 进来抢票）。
 
-function mismatchOf(peaks, binHz, sr, midi, stretch) {
+function mismatchOf(peaks, binHz, sr, midi, stretch, opts = {}) {
   const f0 = midiToHz(midi);
   const partials = [];
   for (let k = 1; k <= PARTIAL_COUNT; k++) {
@@ -310,13 +328,28 @@ function mismatchOf(peaks, binHz, sr, midi, stretch) {
   // O2P：观测到的峰，去预测里找。越响的峰解释不了，扣得越多。
   let mSum = 0, o2p = 0;
   for (const pk of peaks) {
+    // ⚠ 2026-09-24：**带外的峰不参与 O2P**（opts.bandLo/bandHi，由"谱面这一格是哪根弦"定）。
+    //   为什么：拨弦那一下会激起 100/199Hz 那种低频闷响（实测比真音还强 3 倍），它在
+    //   每一格里都"解释不了"→ 把所有候选（包括本音）的失配一起抬到 250~300 的"没证据"档，
+    //   于是**弹对也判错**，而候选表里最爱捡这些低频的正是低八度。1弦1品 F4 被说成 F3、
+    //   直接判错，就是这么来的。限到本弦音域后，带外的闷响/别的弦余响全部出局。
+    const pkHz = pk.bin * binHz;
+    if (opts.bandLo && pkHz < opts.bandLo) continue;
+    if (opts.bandHi && pkHz > opts.bandHi) continue;
     let best = CENTS_TOL;
     for (const p of partials) {
       const c = centsBetween(pk.bin * binHz, p.hz);
       if (c < best) best = c;
     }
-    o2p += pk.mag * best;
-    mSum += pk.mag;
+    // ⚠ 2026-09-24 试过 **O2P 掩码**（只让"这一下新加进来的"峰记罚分，用起音前 170ms 的同分辨率谱
+    //   做掩码）：结果是 —— gt-notes 39/39 不变、琶音 4/1 不变，但
+    //   **错音测试从 对0 变成 对1（出现侥幸过）、test-follow-page 从 4 条掉到 5 条** → **没上线**。
+    //   原因：把"本来就在响"的峰从 O2P 里去掉，等于**同时拿掉了本音的反证** ——
+    //   弹错时那个错音的部分能量也被掩码当掉，于是谱面音更容易凑够分。这条要重做的话，
+    //   得让掩码只作用于"本音不该解释的峰"（P2O 与 O2P 的非对称处理），不能一刀切。
+    const w = pk.fresh == null ? 1 : pk.fresh;
+    o2p += w * pk.mag * best;
+    mSum += w * pk.mag;
   }
   o2p = mSum > 0 ? o2p / mSum : CENTS_TOL;
 
@@ -324,10 +357,10 @@ function mismatchOf(peaks, binHz, sr, midi, stretch) {
 }
 
 // 分数 = 1 / 失配。越大越好，且两个候选的比值就是"失配差几倍"，跟幅度无关。
-function mismatchScore(peaks, binHz, sr, midi) {
+function mismatchScore(peaks, binHz, sr, midi, opts = {}) {
   let best = Infinity, bestDetail = null;
   for (const st of STRETCHES) {
-    const m = mismatchOf(peaks, binHz, sr, midi, st);
+    const m = mismatchOf(peaks, binHz, sr, midi, st, opts);
     if (m.total < best) { best = m.total; bestDetail = m; }
   }
   return { score: 1 / (best + 1e-6), mismatch: best, detail: bestDetail };
@@ -587,6 +620,15 @@ export function verifyExpectedNote(novel, bg, sr, fftSize, targetMidi, rise = nu
   return { mine, rival, ratio: rival > 0 ? mine / rival : 99, rivalMidi };
 }
 
+// ⚠ 2026-09-23 试过把 ±12（八度）/±5 从候选里拿掉（想治"G3 显示成 G2"）——
+//   用户实测：那一版反而把别的问题带回来了。**已还原成原样**，这一处保持项目原设计。
+//   （八度错锁的真正来源在别处，见 `dominantF0InBand` 的成串校验与读数链。）
+// ⚠ 2026-09-24：诊断结论 —— **候选表确实有洞**（原来只有 [0,±1,±2,±5,±12]，
+//   所以"差 ±1/±2 从不放过、差 ±4/±6 老是被判过"）：差 ±4/±6 时表里没有"你实际弹的那个音"，
+//   没人跟本音比 → 判定退化成"本音绝对分过不过 250" → 余响一垫就过。
+//   但**补洞没上线**：试过补 ±3..±7（并给远端对手加"自己得拟合得好"的门槛），
+//   差4/5/6 确实变 对 0，可 gt-notes 从 39/39 掉到 38/39（收紧门槛反而 37/39），
+//   因为多出来的候选会连带扰动 candBest/跳音分支。**要动这张表，得先把判定窗的污染解决。**
 const CANDIDATE_OFFSETS = [0, -1, 1, -2, 2, -12, 12, -5, 5];
 
 // 音准扫描：在目标附近按四分之一音步进，看"往哪个方向挪一点最像"。
@@ -620,20 +662,47 @@ const MARGIN_OK = 1.08;
 // 结论：这条路取决于"能不能把重叠的谐波分开"，是方法问题，不是阈值问题。
 // 判过仍然只靠相对倍数 —— 假通过的风险改由"补测"（多等 40ms 让它衰减清楚）来兜。
 
-export function matchNoteByCandidates(novel, sr, fftSize, targetMidi, capo = 0) {
-  // 峰表只算一次，9 个候选共用
-  const peaks = observedPeaks(novel);
+export function matchNoteByCandidates(novel, sr, fftSize, targetMidi, capo = 0, opts = {}) {
   const binHz = sr / fftSize;
+  // 峰表只算一次，9 个候选共用（opts.rise 给了就带"新不新"；不给 = 行为完全不变）
+  let peaks = observedPeaks(novel, MAX_PEAKS, opts.rise || null, opts.riseBinHz || 0, binHz);
+  // ⚠ 2026-09-24：**显式剔除"上一个音的余响"**（谱面知道上一个音是什么 —— 我们的闭集优势）。
+  //   条件（两条同时成立才剔）：① 这个峰**没抬头**（fresh < 0.25）；② 它落在一个音的某次
+  //   谐波的 ±40 音分内（那个音 = 谱面上一格要弹的音，由页面传 prevMidi）。
+  //   为什么不用"按幅度打折"（试过，净收益 0）：打折会让 O2P 整体退化成常数、判别力只剩
+  //   P2O；**整条剔掉**才是"这一下新加进来的、又解释不了的峰"这个原始的账。
+  if (opts.prevMidi != null) {
+    const prevHz = midiToHz(opts.prevMidi);
+    const keep = [];
+    for (const pk of peaks) {
+      const hz = pk.bin * binHz;
+      let near = false;
+      for (let k = 1; k <= 12; k++) {
+        const f = prevHz * k;
+        if (f > sr / 2 - 300) break;
+        if (Math.abs(1200 * Math.log2(hz / f)) <= 40) { near = true; break; }
+      }
+      const ringing = pk.fresh == null ? false : pk.fresh < 0.25;
+      if (!(near && ringing)) keep.push(pk);
+    }
+    if (keep.length >= 4) peaks = keep;    // 兜底：剔得太狠就退回原表，绝不判"没证据"
+  }
   const lo = LOWEST_MIDI + capo;
   const hi = HIGHEST_MIDI + capo;
   const ranked = CANDIDATE_OFFSETS.map((d) => {
     const midi = targetMidi + d;
-    const m = mismatchScore(peaks, binHz, sr, midi);
+    const m = mismatchScore(peaks, binHz, sr, midi, opts);
     // signal 仍然用"谐波上有没有能量"来量，它回答的是另一个问题：
     // "到底有没有声音"，用来区分"弹错了"和"根本没弹/太轻听不见"。
     const signal = bestScore(novel, sr, fftSize, midi);
     return { midi, offset: d, score: m.score, mismatch: m.mismatch, detail: m.detail, signal };
-  }).filter((x) => x.midi >= lo && x.midi <= hi)      // 弹不出来的音不当候选
+  // ⚠ 2026-09-24：`opts.maxOffset` —— 谱面给了弦品时（exp.string 有值）页面传 2，
+  //   候选表就只剩 ±1/±2 品。理由：**低八度假设天生占便宜**（它把本音的每个谐波都当成
+  //   自己的偶数次谐波），1弦1品 F4 因此常被说成 F3/F2 —— 而 1弦1品 这一格**弹不出**
+  //   低八度（那是 4弦3品，谱面没让你弹）。用户口径：知道谱子就只在该用的地方用这条链路。
+  //   不传 = 保持原样（和弦/没有弦品的格子仍然带全部候选）。
+  }).filter((x) => (opts.maxOffset == null || Math.abs(x.offset) <= opts.maxOffset)
+    && x.midi >= lo && x.midi <= hi)      // 弹不出来的音不当候选
     .sort((a, b) => b.score - a.score);
 
   // 注意这里必须容得下"候选为空"：目标音本身也可能不在音域里（比如调用方传了
@@ -768,6 +837,83 @@ export function hfFluxRelOf(buf) {
   return total > 1e-9 ? flux / total : 0;
 }
 
+// ── 高频抬头率（短窗版）：2kHz 以上的总能量，这一帧是上一帧的几倍 ──────────────
+//
+// 为什么不能只看总电平：真机实测（6415 分解和弦，29s）
+//   漏掉的每一次拨弦，**整段混音的电平几乎没变**（0.97~1.11 倍），因为前一根弦
+//   还在响；但这些时刻 **1.5~4kHz 涨了 2~5 倍**。判据原来量的是"总音量跳没跳"，
+//   在和弦里这个量天然失灵 —— 一弦那一根本来就是最轻的，叠在余响上更是看不出来。
+//
+// 为什么必须用短窗（和上面 fluxRelOf 里的道理一样）：43ms 的窗和上一帧重叠 27ms，
+// 起音那一下被自己的过去稀释掉；10.7ms 的窗才看得出"这一下"。
+//
+// 返回值：>1 = 高频在抬头（新拨），≈1 = 持平，<1 = 在衰减。
+// 没有上一帧基准时返回 1（不表态，交给别的判据）。
+export function hfRiseShortOf(buf) {
+  const riseMags = spectrumOf(buf.subarray(buf.length - RISE_N));
+  const binHz = 48000 / RISE_N;                         // 93.75Hz
+  const from = Math.max(1, Math.floor(2000 / binHz));   // 2kHz 以上
+  let cur = 0, prev = 0;
+  for (let i = from; i < riseMags.length; i++) {
+    cur += riseMags[i];
+    if (prevHfRiseSpec && prevHfRiseSpec.length === riseMags.length) prev += prevHfRiseSpec[i];
+  }
+  prevHfRiseSpec = riseMags;
+  if (prev <= 1e-9) return 1;
+  return cur / prev;
+}
+
+// ── 2kHz+ 频带能量，比自己 lag 帧前涨了几倍（"频带抬头率"）────────────────────
+//
+// 这是**和弦/分解和弦里认起音**的主力判据，真机数据标定出来的（6 段录音、204 次拨弦）：
+//   · 1.5~4kHz、lag=2 帧（32ms）、门限 2.0×
+//     → 真拨弦覆盖 92%（门限 1.8× 时 99%），其余帧 p99 只有 1.68×
+//   · 为什么是这条：分解和弦里前一根弦还在响，**整段混音的电平几乎不跳**
+//     （实测漏掉的每一次拨弦，总电平只有 0.90~1.11 倍，而判据要求 1.4 倍），
+//     但那一下新冒出来的高频能量是实打实的 2~10 倍 —— 这也正是声谱图上
+//     "一眼就看得见"的那点亮。
+//   · 为什么用 lag 而不是相邻帧：拨弦的高频瞬态跨 1~2 帧，相邻帧比会被自己的
+//     上一帧稀释（lag=1 只有 68% 覆盖），lag=2 才稳。
+//   · 为什么余响不会误触发：衰减只会让这个比值 < 1（其它帧 p99 = 1.68）。
+export function hfBandRiseOf(buf) {
+  const seg = buf.subarray(Math.max(0, buf.length - FLUX_N));
+  const mags = spectrumOf(seg);
+  const binHz = 48000 / FLUX_N;                          // 23.4Hz
+  const from = Math.max(1, Math.floor(1500 / binHz));
+  const to = Math.min(mags.length, Math.ceil(4000 / binHz));
+  let cur = 0;
+  for (let i = from; i < to; i++) cur += mags[i];
+  const prev = hfBandHist.length >= 2 ? hfBandHist[0] : null;   // 2 帧前（=32ms）
+  hfBandHist.push(cur);
+  if (hfBandHist.length > 2) hfBandHist.shift();
+  if (prev === null) return 1;
+  return prev > 1e-9 ? cur / prev : (cur > 1e-9 ? 99 : 1);
+}
+
+// ── 基频区（150~600Hz）抬头率：给"频带抬头"那把锁再加一道门 ─────────────────
+//
+// 为什么必须有它（2026-09-22 用户实测"跳音"之后量出来的）：
+//   只看 2kHz+ 抬头，分解和弦里会出现**同一拨被算两次**——高频带在衰减途中
+//   还会抖出 ≥2 倍的小抬头（拾音噪声、拍频）。真机实测 6415慢速 6 对、快速 4 对，
+//   而"等我弹"里每多一次起音就往前吃一个音 → 用户看到的就是"很多跳音"。
+//   加一道"基频区也必须抬头"之后：两段录音的重复都变成 **0 对**，
+//   而真拨弦覆盖只从 16/18 掉到 15/18（几乎没损失）——因为真拨的一下
+//   **一定会重新激励基频**，余响抖动不会。
+export function lowBandRiseOf(buf) {
+  const seg = buf.subarray(Math.max(0, buf.length - FLUX_N));
+  const mags = spectrumOf(seg);
+  const binHz = 48000 / FLUX_N;
+  const from = Math.max(1, Math.floor(150 / binHz));
+  const to = Math.min(mags.length, Math.ceil(600 / binHz));
+  let cur = 0;
+  for (let i = from; i < to; i++) cur += mags[i];
+  const prev = lowBandHist.length >= 2 ? lowBandHist[0] : null;
+  lowBandHist.push(cur);
+  if (lowBandHist.length > 2) lowBandHist.shift();
+  if (prev === null) return 1;
+  return prev > 1e-9 ? cur / prev : (cur > 1e-9 ? 99 : 1);
+}
+
 // ── 频谱"形状"变化（不是音量变化）────────────────────────────────────────────
 // 用来分辨"新拨了一下"和"同一个音变响了"：
 //   · 拨弦：带进新的泛音/宽带瞬态 → 归一化之后的频谱**形状变了**；
@@ -876,6 +1022,49 @@ export function harmonicity(mags, sr, fftSize, f0, excludeCents = 120, maxHarm =
 }
 
 let prevShapeSpec = null;
+// ── 频谱定八度（2026-09-23）：把"读到哪个八度"交给频谱说话 ────────────────────
+// 为什么需要：1 弦 1 品（F4=349Hz）基频弱、第 4 次谐波最强时，YIN 会锁到 4 倍周期上，
+// 读出 87Hz（F2，低两个八度），而且 clarity 还有 0.9 —— 它"理直气壮地"读错。
+// 上面 fixPitchBySpectrum 的修正被限制在 ±120 音分内，跨不了八度，救不了。
+// 做法：拿一个候选 f0，对 f0、f0/2、f0/4、f0×2 各算一次**谐波求和**
+// （k×f0 位置的幅度之和 ÷ 谐波之间的谷），谁最强就用谁——这才是"检测到什么就是什么"
+// （读对，而不是事后把读数折回去）。
+export function octaveCheckedHz(mags, sr, fftSize, hz, maxHarm = 10) {
+  if (!(hz > 0)) return 0;
+  const score = (f0) => {
+    const binHz = sr / fftSize;
+    let sum = 0, n = 0;
+    for (let k = 1; k <= maxHarm; k++) {
+      const f = k * f0;
+      if (f > sr / 2 - 200) break;
+      const c = f / binHz;
+      const lo = Math.max(1, Math.floor(c * 0.985)), hi = Math.min(mags.length - 2, Math.ceil(c * 1.015));
+      let pk = 0;
+      for (let i = lo; i <= hi; i++) if (mags[i] > pk) pk = mags[i];
+      // 用"峰值 ÷ 低次谐波权重"累加：基频与低次谐波在真八度上一定站得住
+      sum += pk / Math.sqrt(k);
+      n++;
+    }
+    return n ? sum / n : 0;
+  };
+  // 候选覆盖 ±2 个八度：YIN 在弱基频上会出现 ÷4（低两个八度）这种锁法，所以要含 ×4。
+  const cands = [hz, hz / 2, hz * 2, hz / 4, hz * 4];
+  let best = hz, bestScore = -1;
+  const scores = [];
+  for (const c of cands) {
+    if (!(c >= 55 && c <= 1200)) continue;
+    const s = score(c);
+    scores.push({ c, s });
+    if (s > bestScore) { bestScore = s; best = c; }
+  }
+  // ⚠ 次谐波歧义的收尾：f0/4 的解释常常"够好"（真音的 4、8、12 次谐波正好是它的 1、2、3 次），
+  //   加上一点低频杂音（弦体轻敲/手持噪声）就能把它顶上去。用户的口径是"读对八度"，
+  //   所以取**分数接近最好的那几个候选里，频率最高**的那个（低次谐波真立着才算数）。
+  const near = scores.filter((x) => x.s >= bestScore * 0.85);
+  if (near.length) best = near.reduce((a, b) => (b.c > a.c ? b : a)).c;
+  return best;
+}
+
 export function shapeFluxOf(buf) {
   const seg = buf.subarray(Math.max(0, buf.length - FLUX_N));
   const mags = spectrumOf(seg);
@@ -1040,12 +1229,124 @@ export function dominantF0InBand(mags, sr, fftSize, loHz = 90, hiHz = 900) {
     if (mags[i] < bandMax * 0.3) continue;                       // 太弱的不算"强线"
     if (!(mags[i] > mags[i - 1] && mags[i] >= mags[i + 1])) continue;   // 要是个峰
     const cand = peakAt(i * binHz, 40);
-    if (cand.hz > 0) return cand;
+    if (cand.hz > 0) {
+      // ⚠ 成串校验（2026-09-23，用户报"3弦空品 G3 显示成 G2"）：
+      //   这条规则原来是"取最低的那根强线"当基频 —— 但别的弦/房间在低处（82~110Hz）
+      //   有一根孤立强线时，它就把 G3(196Hz) 抢成 G2(98Hz)。
+      //   弦乐器的"基频"必须**上面有成串的谐波**（2f、3f 至少有一个立着）；
+      //   孤立的一根线不算基频，跳过它、继续往上看。
+      const m2 = peakAt(cand.hz * 2, 40);
+      const m3 = peakAt(cand.hz * 3, 60);
+      const hasSeries = (m2.hz > 0 && m2.mag > cand.mag * 0.25)
+        || (m3.hz > 0 && m3.mag > cand.mag * 0.15);
+      if (hasSeries) return cand;
+      continue;
+    }
   }
   return peakAt(loHz, 40);
 }
 
 // ── 在给定频带里找**最强**的那根谱线（不是最低的那根）────────────────────────
+// ── "检测到什么就是什么"的正确版本：在**起音差分谱**上找那条**成串的**基频 ──────────
+// 为什么不是"最强线"也不是"最低强线"：
+//   · 取最强线 → 1/2 弦上基频常弱于 2 次谐波 → 读出高一个八度；
+//   · 取最低强线 → 别的弦/房间在低处有一根强线时 → 读出低一个八度（用户实测 3弦空品 G3 读成 G2）。
+// 弦乐器上"有没有这个音"的定义是**谐波列在不在**：基频 f 必须满足 f、2f、3f、4f 都立着。
+// 所以：在差分谱（起音后 − 起音前，旧弦余响被抵掉）上，取**最低的那条"能成串"的线**。
+//   · 单根强线（房间/别的弦）上面没有谐波列 → 不算基频，跳过；
+//   · 真基频的 2 倍频候选虽然也能"成串"，但它比真基频高 → 取最低，就落在真基频上。
+export function f0SeriesFromDiff(postMags, preMags, sr, fftSize, loHz = 70, hiHz = 1200) {
+  const n = Math.min(postMags.length, preMags.length);
+  const d = new Float32Array(n);
+  let peak = 0;
+  for (let i = 0; i < n; i++) { const v = postMags[i] - preMags[i]; d[i] = v > 0 ? v : 0; if (d[i] > peak) peak = d[i]; }
+  if (!(peak > 0)) return { hz: 0, series: 0 };
+  const binHz = sr / fftSize;
+  const lo = Math.max(1, Math.floor(loHz / binHz));
+  const hi = Math.min(n - 2, Math.ceil(hiHz / binHz));
+  const magAt = (hz) => {
+    const c = hz / binHz;
+    const a = Math.max(1, Math.floor(c * 0.97)), b = Math.min(n - 2, Math.ceil(c * 1.03));
+    let m = 0; for (let i = a; i <= b; i++) if (d[i] > m) m = d[i];
+    return m;
+  };
+  // 从一个候选基频出发，算"成串"的程度：k=1..5 都要有能量，且随 k 递减得别太离谱
+  const seriesScore = (f0) => {
+    let sum = 0, hit = 0;
+    // ⚠ 2026-09-23 收紧（用户报"1弦空品 E4 被听成 F2=87Hz"）：
+    //   ① 基频那条线本身要够强（≥ 谱峰值的 30%）——房间/弦体的低频垃圾线够不到；
+    //   ② 成串要更长（k=1..4 都要有），只靠 2f/3f 一条凑出来的不算基频。
+    for (let k = 1; k <= 4; k++) {
+      const f = f0 * k;
+      if (f > hiHz) break;
+      const m = magAt(f);
+      const need = k === 1 ? 0.30 : 0.12;      // 基频那条要明显强
+      if (m <= peak * need) return 0;          // 这一串断了 → 不算基频
+      sum += m / Math.sqrt(k);
+      hit++;
+    }
+    return hit >= 4 ? sum / hit : 0;
+  };
+  let best = 0, bestScore = 0;
+  for (let i = lo; i <= hi; i++) {
+    if (!(d[i] > d[i - 1] && d[i] >= d[i + 1])) continue;   // 只看局部峰
+    if (d[i] < peak * 0.30) continue;                       // 基频线本身要够强（治低频垃圾）
+    const f = i * binHz;
+    const s = seriesScore(f);
+    if (s > bestScore) { bestScore = s; best = f; }         // 取"最低的、成串的"（不取最强）
+  }
+  return { hz: best, series: bestScore ? 1 : 0 };
+}
+
+// ── 「起音即读数」：在**以起音为中心的短窗差分谱**上独立量出"这一次弹的是什么音" ──────
+// （用户 2026-09-24 收工状态 §6 第 2~3 条）
+//   输入 = post − pre（负的已经归零）后的那份谱 —— 也就是"这一下新加进来的谱"。
+//   规则：从**最响的**峰往下找，第一个同时满足
+//     ① 自己带着 2 次（>12% 自身）和 3 次（>5% 自身）谐波 —— 一串谐波立着才算"这个音"；
+//     ② 它不是更低那根谐波（f/2、f/3 处没有强峰）—— 否则会把 2 次谐波当成基频。
+//   频带（loHz/hiHz）由调用方给：**按弦分带**（谱面有弦品时 = 那根弦空弦到 25 品）
+//   是必须的 —— 不限定频带时，拨弦那一下的低频闷响也能凑出 2f/3f，
+//   读数会锁到 82~170Hz 的垃圾线上（离线实测：1弦1品那 16 下一条都对不上）。
+//   返回 null = 这一下没有一条立得住的成串线 → 调用方必须**退回原链路**，不许硬判。
+//   返回值的 h2/h3 = 2 次/3 次谐波相对自身的幅度，给调用方当"可不可信"的证据。
+export function readPluckF0(mags, sr, fftSize, opts = {}) {
+  const loHz = Math.max(55, opts.loHz || 70);
+  const hiHz = Math.min(5000, opts.hiHz || 1200);
+  const binHz = sr / fftSize;
+  const lo = Math.max(2, Math.floor(loHz / binHz));
+  const hi = Math.min(mags.length - 3, Math.ceil(hiHz / binHz));
+  if (hi <= lo + 2) return null;
+  const peaks = [];
+  for (let i = lo; i <= hi; i++) {
+    if (mags[i] > mags[i - 1] && mags[i] >= mags[i + 1]) peaks.push({ hz: i * binHz, mag: mags[i] });
+  }
+  if (!peaks.length) return null;
+  peaks.sort((a, b) => b.mag - a.mag);
+  // 同一个峰附近只留最高那根线（否则 2 次谐波会跟基频抢位置）
+  const keep = [];
+  for (const p of peaks) if (keep.every((q) => Math.abs(1200 * Math.log2(p.hz / q.hz)) > 70)) keep.push(p);
+  const magNear = (hz, tolCents) => {
+    const a = Math.max(1, Math.floor((hz * Math.pow(2, -tolCents / 1200)) / binHz));
+    const b = Math.min(mags.length - 2, Math.ceil((hz * Math.pow(2, tolCents / 1200)) / binHz));
+    let m = 0;
+    for (let i = a; i <= b; i++) if (mags[i] > m) m = mags[i];
+    return m;
+  };
+  const gmax = keep[0].mag;
+  for (const p of keep) {
+    if (p.mag < 0.04 * gmax) break;                     // 太弱的峰不值得看
+    // 更低的谐波：只在**本频带内**查（带外的不算"它是别人的谐波"）
+    const halves = [p.hz / 2, p.hz / 3].filter((h) => h >= loHz);
+    if (halves.some((h) => magNear(h, 40) > 0.35 * p.mag)) continue;
+    const h2 = magNear(p.hz * 2, 45);
+    const h3 = magNear(p.hz * 3, 45);
+    if (h2 > 0.12 * p.mag && h3 > 0.05 * p.mag) {
+      return { hz: p.hz, mag: p.mag, h2: h2 / p.mag, h3: h3 / p.mag, bandMax: gmax };
+    }
+  }
+  return null;
+}
+
 // 为什么不用"最低"：用户实测他弹 C4/A3/D4，别的弦同时在响、线更低，
 // "取最低"会一路锁到别的弦上（导出记录里量出来老是 180~220Hz）→ 全判错。
 // 频带由调用方收窄到"期望音 ±2 个半音"，所以带里只有目标音和它的邻居，
