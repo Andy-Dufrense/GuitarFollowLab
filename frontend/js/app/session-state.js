@@ -13,9 +13,12 @@
 //     否则一声咳嗽 / 一次听不准就能把错误数刷到十几。读用 .has(i)、记用 .add(i)。
 //   missNoted —— "这个音已经记过漏拍/换和弦不流畅了吗"（只记一次，存的是第几个音，-1 = 没记过）。
 //   wrongList —— 弹错清单（每条一句人话）。收尾时"要改的地方"就是它（slice 0..5）。
+//   good / bad / missed / unclearCount —— 这一段的对、错、漏、"测不准"四个计数。
+//     "测不准"（最优解贴在搜索边界）不算弹错，单独一栏。
+//   timingDevs / earlyCount / lateCount —— 跟节拍才有：每个音的偏差（ms，负=抢拍），
+//     以及抢拍、拖拍各几处。不和音准合成一个"对/错"：用户被标红时要能看出错在音还是错在拍。
 //
 // 之后往里搬的顺序（见结构.md）：
-//   good / bad / missed / unclearCount / earlyCount / lateCount / timingDevs →
 //   noteIdx / userPickedStart / holdUntilMs → （最后才是）判定链上那些。
 
 export function createSessionState() {
@@ -23,6 +26,11 @@ export function createSessionState() {
   let wrongNoted = new Set();  // 已经记过错的音（同一个音只记第一次错）
   let missNoted = -1;          // 这个音已经记过"漏拍/换和弦不流畅"了吗（只记一次）
   let wrongList = [];          // 弹错清单（每条一句人话，收尾时取前 5 条给用户看）
+  let good = 0, bad = 0;       // 这一段的对 / 错
+  let missed = 0;              // 漏拍（时间窗过了没弹 / 跳过去了）
+  let unclearCount = 0;        // "测不准"（最优解贴在搜索边界）——不算弹错
+  let timingDevs = [];         // 每个音的偏差（ms，负 = 抢拍）
+  let earlyCount = 0, lateCount = 0;
 
   return {
     get countinPeaks() { return countinPeaks; },
@@ -43,5 +51,27 @@ export function createSessionState() {
     get wrongList() { return wrongList; },
     resetWrongList() { wrongList = []; },
     noteWrong(text) { wrongList.push(text); },
+
+    /** 这一段的对 / 错（收尾算正确率用） */
+    get good() { return good; },
+    get bad() { return bad; },
+    countGood() { good++; },
+    countBad() { bad++; },
+    resetScore() { good = 0; bad = 0; },                    // 开始新一遍时清
+
+    get missed() { return missed; },
+    countMissed() { missed++; },
+
+    get unclearCount() { return unclearCount; },
+    countUnclear() { unclearCount++; },
+    resetMissCounts() { missed = 0; unclearCount = 0; },    // 点谱面换起点时清
+
+    /** 节奏账：偏差直接 .push(...) 进来，抢拍/拖拍各记一处 */
+    get timingDevs() { return timingDevs; },
+    get earlyCount() { return earlyCount; },
+    get lateCount() { return lateCount; },
+    countEarly() { earlyCount++; },
+    countLate() { lateCount++; },
+    resetTiming() { timingDevs = []; earlyCount = 0; lateCount = 0; },   // 开始新一遍时清
   };
 }
