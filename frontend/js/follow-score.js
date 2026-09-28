@@ -38,6 +38,7 @@ import { createTempoLayer } from './app/tempo.js';
 import { diag, resetDiag, initDiag } from './app/diag.js';
 // 和弦练习（卡片 / 试听 / 四拍轮转）—— 2026-09-28 整块搬出去，行为不变
 import { createChordPractice } from './app/chord-practice.js';
+import { createSessionLog } from './app/session-log.js';
 
 let api = null;            // alphaTab 实例（只建一次）
 let score = null;
@@ -641,15 +642,15 @@ const OPEN_STRING_MIDI = { 1: 64, 2: 59, 3: 55, 4: 50, 5: 45, 6: 40 };
 // 会话记录：每个音的"期望 / 实测"，包含判定比值、周期性(clarity)、电平、时刻。
 // 这是**唯一能用来调参的数据**：录一遍干净的（只弹对的）就等于拿到标准答案，
 // 不用再靠"你猜我有没有弹对"。
-let sessionLog = [];
+const slog = createSessionLog();   // 三个会话日志搬进 ./app/session-log.js
 // 起音台帐：**每一次**被判定为起音的事件都记一条（包括后来被判"不像琴声"丢掉的）。
 // 为什么要它：手机上出现"任何音都算对、一阵风过两三个音"，而这个现象在合成信号上
 // 复现不出来 —— 只能靠手机自己的台帐看"到底是什么被当成了起音"。
 // 导出记录里带上它，出问题一串就能定位是哪一关放过去的。
-let onsetLog = [];
+
 // 近似帧日志（2026-09-23）：电平过了门限、却没被认成起音的帧 + 被否决的原因。
 // 只留最近 120 条，导出里带出去（治"快弹有些音没收上"）。
-let nearMissLog = [];
+
 // 时间对齐：每个起音按"它出现在谱面的什么时刻"决定该判哪个音，而不是"弹一下就走一格"。
 // 真机录音实测：30 秒里检出 47 次起音，按次数对齐会整体错位 —— 那时阈值怎么调都没用
 // （从 1.0 到 1.2 都只过 13~14 个）。
@@ -769,7 +770,7 @@ function tempo() {
         markNote(index, 'bad');
         diag(`#${index + 1} ${midiToNameOf(note.midi)}(${note.string}弦${note.fret}品)`
           + ` 窗口 ${(winFrom / 1000).toFixed(2)}~${(winTo / 1000).toFixed(2)}s 没听到 → 错（漏）`);
-        sessionLog.push({
+        slog.session({
           no: index + 1, t: Number((atMs / 1000).toFixed(3)),
           exp: note.midi, expName: midiToNameOf(note.midi), result: 'miss',
         });
@@ -1101,7 +1102,7 @@ function micTickBody() {
   // 近似帧（2026-09-23）：电平到了门限的八成、却没被认成起音 → 记下被否决的原因。
   // 用户报"快弹有些音没收上、确定是检测没起来"，靠这份日志就能指出卡在哪一条。
   if (!gateOut.onset && phase === 'waiting' && lv > gateOut.strongGate * 0.8) {
-    nearMissLog.push({
+    slog.nearMiss({
       t: Number((now / 1000).toFixed(3)), why: gateOut.why,
       lv: Number(lv.toFixed(4)), gate: Number(gateOut.strongGate.toFixed(4)),
       prevLv: Number(prevLv.toFixed(4)), lagged: Number(lagged.toFixed(4)),
@@ -1110,7 +1111,7 @@ function micTickBody() {
       shape: Number(shapeFlux.toFixed(3)), hfBand: Number((hfBandRise || 0).toFixed(2)),
       loBand: Number((lowBandRise || 0).toFixed(2)),
     });
-    if (nearMissLog.length > 120) nearMissLog.shift();
+    slog.capNearMiss();
   }
   // 起音层逐帧台帐（只在 test-follow-real.mjs 的 VC_ONSET_DEBUG=1 时打）：
   // 查"这一段为什么没被当起音 / 为什么一下被算成两下"用。对页面没有任何影响。
@@ -1149,7 +1150,7 @@ function micTickBody() {
     // 否则同一个音会被判两次。谁先到算谁的。
     techDueMs = 0;
     if (globalThis.__onsetLog) globalThis.__onsetLog.push(Number((now / 1000).toFixed(3)));
-    onsetLog.push({
+    slog.onset({
       t: Number((now / 1000).toFixed(3)), level: Number(lv.toFixed(5)),
       floor: Number(floor.toFixed(5)), gate: Number(strongGate.toFixed(5)),
       flux: Number(flux.toFixed(3)), hfFlux: Number(hfFlux.toFixed(3)),
@@ -1322,7 +1323,7 @@ function micTickBody() {
         //     stringOk = clarity 过 **或** 谐波墙 ≥ pluckHnrMin(2.5)
         //   不用 YIN 单独定生死（它在叠音里必失效，真音就是这么被吞的）。
         notAString = true;
-        const last0 = onsetLog[onsetLog.length - 1];
+        const last0 = slog.lastOnset();
         if (last0) {
           last0.hnr = Number(hnr.toFixed(1));
           last0.sparse = Number(sparse.toFixed(2));
@@ -1334,7 +1335,7 @@ function micTickBody() {
     }
     if (notAString) {
       {
-        const last = onsetLog[onsetLog.length - 1];
+        const last = slog.lastOnset();
         if (last) (last.retry = last.retry || []).push(`${(a.pitch.clarity || 0).toFixed(2)}/${Math.round(a.pitch.hz || 0)}Hz`);
       }
       if (windowTries < CFG.pluckRetries) {
@@ -1344,7 +1345,7 @@ function micTickBody() {
       } else {
         phase = 'waiting';
         // 这一下没通过"像不像一根弦"的关卡 —— 记进台帐，别让它悄无声息地消失
-        const last = onsetLog[onsetLog.length - 1];
+        const last = slog.lastOnset();
         if (last) { last.dropped = 'not-a-string'; last.clarity = Number((a.pitch.clarity || 0).toFixed(3)); last.hz = Math.round(a.pitch.hz || 0); }
         // 这一下不算数（不像琴声）→ 把刚才预览挪过去的光标收回来
         if (modeKind !== 'tempo') highlightCurrent();
@@ -1695,7 +1696,7 @@ function micTickBody() {
           $('wrongs').textContent = '弹错/漏：' + wrongList.join('、');
           $('missed').textContent = missed;
           markNote(best, 'bad');
-          sessionLog.push({
+          slog.session({
             no: best + 1, t: Number((now / 1000).toFixed(3)),
             exp: exp.midi, expName: midiToNameOf(exp.midi), result: 'miss',
           });
@@ -2210,7 +2211,7 @@ function micTickBody() {
       //   同一作用域里重复 const 会直接语法错。）
       const prevIdx = best - 1;
       const prevLog = prevIdx >= 0 ? notes[prevIdx] : null;
-      sessionLog.push({
+      slog.session({
         no: best + 1, t: Number((now / 1000).toFixed(3)),
         exp: exp.midi, expName: midiToNameOf(exp.midi),
         str: exp.string ?? null, fret: exp.fret ?? null,
@@ -2253,7 +2254,7 @@ function micTickBody() {
       });
       // 起音台帐里也补上这一下的结果（前面只记了"检测到"这一半）
       {
-        const last = onsetLog[onsetLog.length - 1];
+        const last = slog.lastOnset();
         if (last) Object.assign(last, {
           judgedAs: midiToNameOf(exp.midi), result: pass ? 'ok' : (unclear ? 'unclear' : 'bad'),
           measured: midiToNameOf(midiP), cents: Number(centsP.toFixed(1)),
@@ -2526,8 +2527,8 @@ async function startMic() {
       + `（${notes[noteIdx].string}弦 ${notes[noteIdx].fret}品）`;
   }
   wrongList = [];
-  sessionLog = [];
-  onsetLog = [];
+  slog.reset();
+  // （onsetLog 由上面的 slog.reset() 一起清）
   timingDevs = []; earlyCount = 0; lateCount = 0;
   // ★ **音准基线必须清**：它是"这把琴这几分钟整体偏高/偏低多少"的估计，
   // 跨轮使用会把上一轮（可能被带坏的，比如 -335 音分）一直带进新的一遍 →
@@ -2640,8 +2641,8 @@ if ($('title') && !$('title').textContent) $('title').textContent = 'v' + BUILD 
 if ($('ver')) $('ver').textContent = 'v' + BUILD;
 window.__page = () => ({ songKind, userBpm, chordIdx: chordPractice.idx, beat, hasApi: !!api });
 // 给离线分析用的钩子：拿到这一遍的逐音记录（导出按钮存的就是它）
-window.__vcSessionLog = () => sessionLog;
-window.__vcOnsetLog = () => onsetLog;
+window.__vcSessionLog = () => slog.sessions;
+window.__vcOnsetLog = () => slog.onsets;
 window.__vcAlignInfo = () => alignInfo;
 window.__vcSlots = (mockScore, trackIndex) => collectScoreSlots(mockScore, trackIndex);
 // 判定清单 → 光标位置的映射：离线回归要能单独测它（不开浏览器）
@@ -2655,7 +2656,7 @@ window.__vcSetScore = (s, trackIndex = 0) => { score = s; buildTickMap(s, trackI
 // 导出记录：把这一遍每个音的"期望 / 实测"存成 JSON 文件。
 // 这是给我调参用的数据 —— 你录一遍"只弹对的"，就等于给我标准答案。
 $('saveLog').onclick = () => {
-  if (!sessionLog.length) { err('还没有记录，先点「跟弹」弹一遍再导出。'); return; }
+  if (!slog.sessions.length) { err('还没有记录，先点「跟弹」弹一遍再导出。'); return; }
 // 导出两份：判定过的音（notes）+ **每一次起音**（onsets，含被判"不像琴声"丢掉的）。
 // 排查手机上"任何音都算对/一阵风过两三个音"就靠 onsets 这份。
 const blob = new Blob([JSON.stringify({
@@ -2665,19 +2666,19 @@ const blob = new Blob([JSON.stringify({
   metro: !!($('metro') && $('metro').checked),
   bpm: userBpm,
   align: alignInfo,          // 谱面 × 时间轴的对齐结论（对不上时这里能看出来）
-  notes: sessionLog, onsets: onsetLog,
+  notes: slog.sessions, onsets: slog.onsets,
   // ── 近似帧日志（2026-09-23 加，治"快弹漏音"）─────────────────────────────────
   // 用户说"确定是检测没起来"。这一份把**没被认成起音、但电平已经过了门限**的那些帧记下来，
   // 带上它被哪条判据否决（why）和当时的量（电平/涨速/形状/频带抬头）。
   // 快弹一段导出后，看这份就能直接指出"这一下卡在不够陡 / 没有新拨的迹象 / 形状没变"。
-  nearMiss: nearMissLog,
+  nearMiss: slog.nearMisses,
 }, null, 1)],
     { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `follow-log-${songKind}-${Date.now()}.json`;
   a.click();
-  err(`已导出 ${sessionLog.length} 条记录`);
+  err(`已导出 ${slog.sessions.length} 条记录`);
 };
 
 $('selftest').onclick = async () => {
