@@ -11,7 +11,7 @@
 // 依赖全部注入（$ / audio / session / slog / setVerdict / flashBeat / scoreView /
 // chordPractice / arpCells / midiToNameOf），模块内部不读全局。
 
-import { rms, spectrumOf } from '../engine/dsp.js?v=0928-1835';
+import { rms, spectrumOf } from '../engine/dsp.js?v=0928-1845';
 import {
   track, fluxRelOf, resetAnalysis, novelSpectrum, verifyExpectedNote, chordOutsiders,
   getFluxSpec, getBeforeFluxSpec, estimateF0Near, estimateF0ByPeaks, hfFluxRelOf,
@@ -20,10 +20,10 @@ import {
   shapeFluxOf, harmonicity, spectralSparsity, spectralFlatness, spectralPeakiness, f0SeriesFromDiff,
   dominantF0InBand, strongestF0InBand, diffMags, matchNoteByCandidates, readPluckF0,
   spectralMagAt,
-} from '../engine/analysis.js?v=0928-1835';
-import { CFG, FLUX_N } from '../engine/config.js?v=0928-1835';
-import { decideOnset, ONSET } from '../engine/onset.js?v=0928-1835';
-import { judgeNote, decideByCandidates, JUDGE } from '../engine/judger.js?v=0928-1835';
+} from '../engine/analysis.js?v=0928-1845';
+import { CFG, FLUX_N } from '../engine/config.js?v=0928-1845';
+import { decideOnset, ONSET } from '../engine/onset.js?v=0928-1845';
+import { judgeNote, decideByCandidates, JUDGE } from '../engine/judger.js?v=0928-1845';
 import { createTempoLayer } from './tempo.js';
 import { diag, resetDiag } from './diag.js';
 
@@ -1796,6 +1796,17 @@ function concludeNote({ best, candBest, centsP, devMs, exp, midiP, pass, passSlo
   lastJudgeMs = onsetAtMs;
   if (passSlot) session.countGood();
   else if (firstWrong) { session.countBad(); session.wrongNoted.add(best); }
+  // ⚠ 2026-09-28：**把这一下的结果回报给跟节拍层**。`tempo().onJudged()` 一直
+  //   没被调用过（只有定义、没有调用点），后果两条：
+  //     ① `state[index]` 永远空 → 上面挑候选时 `tempo().state()[j]` 拦不住
+  //        "已经判过的音"，同一个音会被后面的起音再判一次；
+  //     ② 弹早/弹晚时那套"先按第 N 个音认下、判定之后重新对齐时间轴"
+  //        （`setLateAccept(true)` → `onJudged` 里改 originMs）**从来没生效**，
+  //        于是偏一次就一路偏下去。
+  //   只在跟节拍模式调（慢练模式不碰时间轴）；慢练的对错/推进逻辑一字不动。
+  if (modeKind === 'tempo') {
+    try { tempo().onJudged(best, passSlot, devMs); } catch (e) { /* 时间轴没起来就算了 */ }
+  }
   scoreView.markNote(best, passSlot ? 'ok' : (unclear ? 'unclear' : 'bad'));   // 谱面上标对错
   setVerdict(passSlot
     ? (slotSize > 1
