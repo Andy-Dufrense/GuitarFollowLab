@@ -11,11 +11,11 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0928-1647';
+const BUILD = '0928-1712';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
-import { rms, spectrumOf } from './engine/dsp.js?v=0928-1647';
+import { rms, spectrumOf } from './engine/dsp.js?v=0928-1712';
 import * as audio from './audio.js';
 import {
   track, fluxRelOf, resetAnalysis, novelSpectrum, verifyExpectedNote, chordOutsiders,
@@ -24,12 +24,13 @@ import {
   lowBandRiseOf,
   shapeFluxOf, harmonicity, spectralSparsity, spectralFlatness, spectralPeakiness, f0SeriesFromDiff,
   dominantF0InBand, strongestF0InBand, diffMags, matchNoteByCandidates, readPluckF0,
-} from './engine/analysis.js?v=0928-1647';
-import { CFG, FLUX_N } from './engine/config.js?v=0928-1647';
+  spectralMagAt,
+} from './engine/analysis.js?v=0928-1712';
+import { CFG, FLUX_N } from './engine/config.js?v=0928-1712';
 // （节拍器核心 metro-core.js 由 ./app/arp-cells.js 直接 import，这里不再用）
 // 分层：检测能力（起音层 / 判定层）各自一个文件，阈值也都收在那两个文件里。
-import { decideOnset, ONSET } from './engine/onset.js?v=0928-1647';
-import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js?v=0928-1647';
+import { decideOnset, ONSET } from './engine/onset.js?v=0928-1712';
+import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js?v=0928-1712';
 // 光标层：谱面格子 ↔ 判定清单 的对号（纯函数，单独一个文件）
 import { collectScoreSlots, mapSequenceToSlots } from './app/cursor.js';
 // 跟节拍层（状态机 + 拍点 + 提示音）—— 这一层只通过回调跟页面打交道
@@ -859,7 +860,14 @@ function micTickBody() {
   //   所以"高把位侥幸过"不是被闷响填出来的泛音假象，我对根因的判断不完整 →
   //   **没上线**。下一步先查"那 5 次到底走了哪条放行通道"（passCand / quietOk / 兜底），
   //   有了证据再动，不再猜。
-  if (phase === 'settling' && now - onsetAtMs >= 90) {
+  // ⚠ 2026-09-28：**多音格（双音/三音）要等到稳定段再判**，单音不动。
+  //   用户口径：「小琶音也要算过」—— 而小琶音的三根弦是先后到的（实测最后一根
+  //   约 +170ms 才起来）。单音那套在起音+90ms 就判，那时窗里只有第一根弦：
+  //   真弹的 C#4(−14.8dB) 与没弹的 C4(−18.3dB) 只差 3.5dB，怎么调门限都分不开。
+  //   等满稳定段（窗自动变成 [起音+60, 起音+230]）后，两者差 16.6dB。
+  //   代价：多音格晚 140ms 出结果；单音一格的判定时刻、窗、阈值全部不变。
+  const settleNeedMs = (slotEndIdx(session.noteIdx) - session.noteIdx > 1) ? CFG.multi.judgeMs : 90;
+  if (phase === 'settling' && now - onsetAtMs >= settleNeedMs) {
     // 判定段切到 judgeSettledFrame（见下面）：它只拿「这一帧」的五个量。
     const settled = judgeSettledFrame({ buf, lv, domHz, now, srRate });
     if (settled === 'schedule') { micTimer = requestAnimationFrame(micTick); return; }
@@ -1779,31 +1787,68 @@ function judgeSettledFrame({ buf, lv, domHz, now, srRate }) {
       const groupMidis = notes.slice(best, slotLast).map((n) => n.midi + pitchShift());
       let ratio = 0;
       try { ratio = chordOutsiders(novel, sr2, a.fftN, groupMidis).ratio; } catch (e) { ratio = 0; }
+      let ratioSpec = 0;    // 同一件事在**稳定段那扇窗**上量（诊断/对照用）
+      try { ratioSpec = chordOutsiders(spec, specRate, specN, groupMidis).ratio; } catch (e) { ratioSpec = 0; }
+      let ratioDiff = 0;    // 在**起音前后差分谱**（onsetDiffSpec）上量
+      try { ratioDiff = onsetDiffSpec ? chordOutsiders(onsetDiffSpec, peakRate, PEAK_N, groupMidis).ratio : 0; } catch (e) { ratioDiff = 0; }
       let weakest = null, weakestHnr = Infinity;
-      const hnrList = [];                     // 诊断用：这一格每个音各自的存在性
+      const hnrList = [];                     // 这一格每个音各自的谐波墙
+      const lvList = [];                      // 这一格每个音各自的**基频线大小**
+      const lvBinList = [];                   // 那一根线落在哪个 bin（诊断用，查"抓到的是什么"）
+      const binHz = specRate / specN;
       for (let k = best; k < slotLast; k++) {
         const hz = 440 * Math.pow(2, (notes[k].midi + pitchShift() - 69) / 12);
         let h = 0;
         try { h = harmonicity(spec, peakRate, PEAK_N, hz); } catch (e) { h = 0; }
         hnrList.push(h);
         if (h < weakestHnr) { weakestHnr = h; weakest = notes[k]; }
+        // 这个音的基频线有多大（这就是"这一根弦弹响了没有"）。
+        // ⚠ 2026-09-28 踩过的坑：一开始写成"±40 音分内取最高的一根"—— 8192 点谱的
+        //   bin 是 5.86Hz，而 C4(261.6) 和 C#4(277.2) 只差 2.7 个 bin，取最高的那根
+        //   会**抓到隔壁音的尾巴**（实测 C4 抓到 270Hz＝C#4 的线，虚高 15dB，
+        //   于是"没弹的 C4"被当成弹了）。改成在**精确频率上线性插值**取值。
+        const m = spectralMagAt(spec, specRate, specN, hz);
+        lvList.push(m);
+        lvBinList.push(Math.round(hz / binHz));
       }
-      const ratioOk = ratio >= 0.7;              // 和"和弦练习"同一个门限
-      const presentOk = weakestHnr >= 2.0;       // 每个音自己那串谐波要立着
+      // ⚠ 2026-09-28：**解释率不再当"判过"的硬门**，只留作诊断。
+      //   理由（真机量出来的）：① 它在"同一格重复弹"时会塌（正确三音第 2 遍
+      //   novel 解释率 1.00 → 0.36，稳定窗 0.85，差分谱 0.03），于是把**弹对的**
+      //   判错；② 它结构上也看不见"少写一个高八度的那根弦"——F#4=370Hz 正好是
+      //   F#3 的 2 次谐波，天生被解释掉（三音靶子 −F#4 那一版解释率仍是 1.00）。
+      //   所以它既会误杀、又抓不到该抓的 → 不配当门。它的本职（抓"多弹了谱面外的音"）
+      //   留给下一步：要真的做，得按"谐波包络"去问（多出来的那根线是不是比同弦
+      //   应有谐波包络更凸），不是问"有没有解释不了的能量"。
+      const ratioOk = ratio >= 0.7;              // 只用于诊断输出
+      // ── 两道门（2026-09-28，阈值在 CFG.multi）──────────────────────────────
+      //   ① 电平门：每个期望音的基频线要 ≥（同格最响那根 + levelDb）。
+      //      "没弹的音"在稳定段会掉到 −24dB 以下（真弹的只有 −7.6~0），所以这条
+      //      正好抓"少弹了一个"。用**相对**门（比同格最响那根低多少），
+      //      这样弹得轻/弹得响都不影响。
+      //   ② 谐波门：谐波墙 ≥ hnrMin。电平门挡不住"邻座有人弹琴/咳嗽"（那些
+      //      几根线的电平是平的），但它们立不起谐波墙（实测只有 1.5~3.1）。
+      const lvMax = Math.max(...lvList, 1e-12);
+      const lvDb = lvList.map((v) => 20 * Math.log10((v + 1e-15) / lvMax));
+      const lvOk = lvDb.every((d) => d >= CFG.multi.levelDb);
+      const presentOk = lvOk && weakestHnr >= CFG.multi.hnrMin;
+      // 报"缺了哪个"：先看电平（没弹的音会掉下去），再看谐波
+      let badK = best;
+      if (!lvOk) { let m = Infinity; lvDb.forEach((d, i) => { if (d < m) { m = d; badK = best + i; } }); }
+      else { badK = best + hnrList.indexOf(weakestHnr); }
       // 诊断（默认关，VC_MULTI_DIAG=1 才打）：多音格为什么判过/判不过的证据。
-      // 只多打一行日志，不参与任何判定 —— 判定行为与不加这一行完全相同。
       if (globalThis.__vcMultiDiag) {
         console.log('[多音] #' + (best + 1) + ' 要 '
           + notes.slice(best, slotLast).map((n) => midiToNameOf(n.midi)).join('+')
           + ' ｜ 解释率 ' + ratio.toFixed(2) + (ratioOk ? ' ✓' : ' ✗')
-          + ' ｜ 各音存在性 '
-          + notes.slice(best, slotLast).map((n, i) => midiToNameOf(n.midi) + '=' + hnrList[i].toFixed(2)).join(' ')
-          + (presentOk ? ' ✓' : ' ✗ 最弱 ' + midiToNameOf(weakest.midi)));
+          + '（稳定窗 ' + ratioSpec.toFixed(2) + '／差分 ' + ratioDiff.toFixed(2) + '）'
+          + ' ｜ 各音 电平/谐波 '
+          + notes.slice(best, slotLast).map((n, i) => midiToNameOf(n.midi) + '=' + lvDb[i].toFixed(1) + 'dB/' + hnrList[i].toFixed(1)
+            + '@' + Math.round(lvBinList[i] * binHz) + 'Hz').join(' ')
+          + ' ｜ 判定@起音+' + Math.round(now - onsetAtMs) + 'ms（窗 ' + specN + '@' + Math.round(specRate) + '）'
+          + ' ｜ 门限 ' + CFG.multi.levelDb + 'dB & ' + CFG.multi.hnrMin
+          + (presentOk ? ' ✓' : ' ✗ 差 ' + midiToNameOf(notes[badK].midi)));
       }
-      if (!presentOk) slotBad = weakest;
-      else if (!ratioOk) {
-        slotBad = { midi: exp.midi, string: exp.string, fret: exp.fret, extra: true };
-      }
+      if (!presentOk) slotBad = notes[badK];
     }
     const passSlot = pass && !slotBad;
     // 判"错"之后要说出**用户弹的是哪个音**。问题：上面那把尺子是在"谱面那个音"的
