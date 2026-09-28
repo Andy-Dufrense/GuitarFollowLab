@@ -11,11 +11,11 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0928-1545';
+const BUILD = '0928-1553';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
-import { rms, spectrumOf } from './engine/dsp.js?v=0928-1545';
+import { rms, spectrumOf } from './engine/dsp.js?v=0928-1553';
 import * as audio from './audio.js';
 import {
   track, fluxRelOf, resetAnalysis, novelSpectrum, verifyExpectedNote, chordOutsiders,
@@ -24,12 +24,12 @@ import {
   lowBandRiseOf,
   shapeFluxOf, harmonicity, spectralSparsity, spectralFlatness, spectralPeakiness, f0SeriesFromDiff,
   dominantF0InBand, strongestF0InBand, diffMags, matchNoteByCandidates, readPluckF0,
-} from './engine/analysis.js?v=0928-1545';
-import { CFG, FLUX_N } from './engine/config.js?v=0928-1545';
+} from './engine/analysis.js?v=0928-1553';
+import { CFG, FLUX_N } from './engine/config.js?v=0928-1553';
 import { createMetro } from './metro-core.js';
 // 分层：检测能力（起音层 / 判定层）各自一个文件，阈值也都收在那两个文件里。
-import { decideOnset, ONSET } from './engine/onset.js?v=0928-1545';
-import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js?v=0928-1545';
+import { decideOnset, ONSET } from './engine/onset.js?v=0928-1553';
+import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js?v=0928-1553';
 // 光标层：谱面格子 ↔ 判定清单 的对号（纯函数，单独一个文件）
 import { collectScoreSlots, mapSequenceToSlots } from './app/cursor.js';
 // 跟节拍层（状态机 + 拍点 + 提示音）—— 这一层只通过回调跟页面打交道
@@ -156,9 +156,9 @@ function initAlphaTab() {
           setVerdict('正在跟弹 —— 先点「停止」，再点谱面换练习位置', '');
           return;
         }
-        noteIdx = idx;
-        holdUntilMs = 0;
-        userPickedStart = true;      // 明确点过谱面 → 这一遍从这儿开始
+        session.noteIdx = idx;
+        session.holdUntilMs = 0;
+        session.pickedStart = true;      // 明确点过谱面 → 这一遍从这儿开始
         // 从新的地方开始练：**旧的谱面标记要清掉**。
         // （不然新一段和上一段的绿/红混在一起，看不出这次练到哪。）
         if ($('marks')) $('marks').innerHTML = '';
@@ -281,8 +281,8 @@ function markNote(idx, kind) {
   } catch (e) { /* 定位失败就不标，不影响判定 */ }
 }
 
-// index 省略 = 当前该弹的那个音（noteIdx）；给"起音预览"用时会显式传下一个音
-function highlightCurrent(index = noteIdx) {
+// index 省略 = 当前该弹的那个音（session.noteIdx）；给"起音预览"用时会显式传下一个音
+function highlightCurrent(index = session.noteIdx) {
   if (!api) { highlightCell(Math.max(0, Math.min(index, (notes || []).length - 1))); return; }
   const box = document.getElementById('cursor');
   const idx = Math.max(0, Math.min(index, (noteBeats || []).length - 1));
@@ -407,7 +407,7 @@ const chordPractice = createChordPractice({
 // ── 顶部按钮 ─────────────────────────────────────────────────────────────────
 $('song').onchange = async () => {
   // 切曲目时**先停掉跟弹**：不然麦克风循环还在跑，而判定清单已经换成新的那份
-  // （notes 被清空、noteIdx 归零），两边对不上 —— 手机上表现为"切一下就卡住"。
+  // （notes 被清空、session.noteIdx 归零），两边对不上 —— 手机上表现为"切一下就卡住"。
   if (micTimer) stopMic();
   phase = 'idle';
   techDueMs = 0;
@@ -415,7 +415,7 @@ $('song').onchange = async () => {
   chordPractice.stop();
   if (api && api.playerState === 1) api.playPause();
   // 换曲目 = 换一份判定清单：清掉上一份（含光标对照表）
-  notes = null; notesMeta = null; noteIdx = 0; noteBeats = []; noteTicks = [];
+  notes = null; notesMeta = null; session.noteIdx = 0; noteBeats = []; noteTicks = [];
   if (songKind === 'chords') {
     await chordPractice.load();
     $('scoreWrap').style.display = 'none';
@@ -525,7 +525,7 @@ $('tuneDown').onchange = () => {
 let micTimer = 0;
 let notes = null;          // Hey Jude 谱面音符（时间轴）
 let notesMeta = null;      // 谱面 meta（含 timeSignatures —— 节拍器按小节/拍号走要用）
-let noteIdx = 0;
+// noteIdx / pickedStart / holdUntilMs 已搬进 ./app/session-state.js（session.noteIdx / session.pickedStart / session.holdUntilMs 直接读写）。
 let phase = 'idle';        // idle | countin | waiting | settling
 let onsetAtMs = 0;
 // ⚠ 2026-09-24：判定时刻。默认 0 = 老行为（起音后 90ms 定案）；
@@ -555,7 +555,6 @@ let lastJudgeMs = null;        // 跟节拍：最后一个判完的音（总时�
 let noteClockStart = null;
 let heardInWindow = false;
 let windowTries = 0;          // 同一个音的重试次数（第一下不能被丢弃）
-let holdUntilMs = 0;          // 上一个音的延音期：这段时间内不判下一个音
 let refractoryUntilMs = 0;    // 两次拨弦的最小间隔（按谱面这一段音间距自适应）
 let onsetPeakSpec = null;     // 起音那一刻的快照频谱（老判据用的那份）
 // 差分谱：**起音前 170ms 与起音后 170ms 相减**，只剩"这一下新拨进去的东西"。
@@ -691,9 +690,8 @@ let onsetPeakLv = 0;       // 这一次起音那一刻的电平（用来验"尾�
 let peakLvRef = 0;
 // "用户明确点过谱面某个音" —— 只有点过，这一遍才从那儿开始；
 // 否则**永远从第一个音开始**。（原来只写"上一遍弹完了才回到开头"，
-// 于是中途停过一次之后，noteIdx 残留，下一遍就从中间开始 ——
+// 于是中途停过一次之后，session.noteIdx 残留，下一遍就从中间开始 ——
 // 用户实测"点跟弹还是从第二小节开始、第一个音根本没在待测里"。）
-let userPickedStart = false;
 
 // 容许偏差：按时值比例给，再夹上下限 —— 这不是行业标准公式（没有那种东西），
 // 是按"等时序列的起音差异阈约 20~30ms"和"别拖到下一个音"两头定的起点值。
@@ -755,7 +753,7 @@ function tempo() {
       userBpm: () => userBpm,
       expectedAtMs: (i) => expectedAtMs(i),
       toleranceMs: (i) => timingToleranceMs(i),
-      setNoteIdx: (i) => { noteIdx = i; },
+      setNoteIdx: (i) => { session.noteIdx = i; },
       midiName: (m) => midiToNameOf(m),
       metroOn: () => !!($('metro') && $('metro').checked),
       getCtx: () => audio.getCtx(),
@@ -840,9 +838,9 @@ function renderCells() {
           setVerdict('跟弹进行中：先点「停止」，再点你想从哪一格开始');
           return;
         }
-        noteIdx = i;
-        userPickedStart = true;
-        holdUntilMs = 0;
+        session.noteIdx = i;
+        session.pickedStart = true;
+        session.holdUntilMs = 0;
         // 从新的地方开始练：**旧的标记要清掉**（跟谱面那条路的做法一致）——
         // 不然新一段和上一段的绿/红混在一起，看不出这次练到哪、对错是哪一遍的。
         if ($('marks')) $('marks').innerHTML = '';
@@ -999,28 +997,28 @@ function micTickBody() {
   //   · "换和弦不流畅"**只有和弦谱**用，别的谱记"漏拍"；
   //   · **等我弹模式只判对错**，不记漏拍、不记时机 —— 你停下来想多久都不算错。
   if (modeKind === 'tempo' && phase === 'waiting' && lastOnsetMs > 0
-      && notes && notes[noteIdx] && session.missNoted !== noteIdx) {
-    const prevNote = notes[noteIdx - 1];
-    const ioiMs = prevNote ? Math.max(0.15, notes[noteIdx].t - prevNote.t) * 1000 : 400;
+      && notes && notes[session.noteIdx] && session.missNoted !== session.noteIdx) {
+    const prevNote = notes[session.noteIdx - 1];
+    const ioiMs = prevNote ? Math.max(0.15, notes[session.noteIdx].t - prevNote.t) * 1000 : 400;
     const beatMs = (60 / (userBpm || 76)) * 1000;
     const limitMs = Math.max(700, Math.max(1.5 * ioiMs, 2 * beatMs));
     if (now - lastOnsetMs > limitMs) {
-      session.markMissed(noteIdx);
+      session.markMissed(session.noteIdx);
       const isChordScore = songKind === 'chords'
-        || !!(notes[noteIdx].chord || (prevNote && prevNote.chord));
+        || !!(notes[session.noteIdx].chord || (prevNote && prevNote.chord));
       const isChange = isChordScore && (!prevNote
-        || (notes[noteIdx].measure || 0) !== (prevNote.measure || 0)
-        || !!(notes[noteIdx].chord && prevNote.chord && notes[noteIdx].chord !== prevNote.chord));
+        || (notes[session.noteIdx].measure || 0) !== (prevNote.measure || 0)
+        || !!(notes[session.noteIdx].chord && prevNote.chord && notes[session.noteIdx].chord !== prevNote.chord));
       session.countMissed();
-      if (!session.wrongNoted.has(noteIdx)) { session.countBad(); session.wrongNoted.add(noteIdx); }
-      markNote(noteIdx, 'bad');
+      if (!session.wrongNoted.has(session.noteIdx)) { session.countBad(); session.wrongNoted.add(session.noteIdx); }
+      markNote(session.noteIdx, 'bad');
       if ($('missed')) $('missed').textContent = String(session.missed);
       if ($('bad')) $('bad').textContent = String(session.bad);
       if ($('heard')) $('heard').textContent = isChange ? '换和弦没跟上' : '漏拍';
       const idleSec = ((now - lastOnsetMs) / 1000).toFixed(1);
       setVerdict(isChange
-        ? `⚠ 换和弦不流畅：第 ${(notes[noteIdx].measure || 0) + 1} 小节这里停了 ${idleSec}s —— 重弹这一个`
-        : `⚠ 漏拍：这一格空了 ${idleSec}s —— 重弹这一个（谱面要 ${midiToNameOf(notes[noteIdx].midi + pitchShift())}）`, 'bad');
+        ? `⚠ 换和弦不流畅：第 ${(notes[session.noteIdx].measure || 0) + 1} 小节这里停了 ${idleSec}s —— 重弹这一个`
+        : `⚠ 漏拍：这一格空了 ${idleSec}s —— 重弹这一个（谱面要 ${midiToNameOf(notes[session.noteIdx].midi + pitchShift())}）`, 'bad');
     }
   }
   // 起音判据调严一点：真拨弦是"明显"的一跳，环境声/说话不该触发。
@@ -1057,8 +1055,8 @@ function micTickBody() {
   // 这样一次拨弦的余响抖动不会再被当成"下一个音"（4 下跳 8 个的问题）。
   // 谱面知道"这里是连续两个相同音"：同一根弦同一个音再拨一次，频谱上没有新音高可认，
   // 判据必须放宽，否则一定漏 —— 这是"连续两个一样的音"测不准的主因。
-  const curN = notes && notes[noteIdx];
-  const prevN = notes && notes[noteIdx - 1];
+  const curN = notes && notes[session.noteIdx];
+  const prevN = notes && notes[session.noteIdx - 1];
   const repeatSame = !!(curN && prevN && curN.midi === prevN.midi);
   // ── "够不够陡"是这一层最要紧的判据 ─────────────────────────────────────
   // 用户实测：**只弹一个音让它一直响**，隔一会儿光标自己往前跳好几个音，还一直判对。
@@ -1096,8 +1094,8 @@ function micTickBody() {
     lv, prevLv, lagged, gate, floor, flux, hfFlux, hfBandRise, lowBandRise, shapeFlux, repeatSame,
     // ⚠ 2026-09-24：快段落标志（谱面这一段音间距 ≤350ms）——起音层用它放宽"2kHz 抬头"这条线
     //   （1.8 而不是 2.5）。只影响快段落；慢/中速一位不改。
-    fastPassage: !!(notes && notes[noteIdx] && notes[noteIdx + 1]
-      && (notes[noteIdx + 1].t - notes[noteIdx].t) <= 0.35),
+    fastPassage: !!(notes && notes[session.noteIdx] && notes[session.noteIdx + 1]
+      && (notes[session.noteIdx + 1].t - notes[session.noteIdx].t) <= 0.35),
   });
   const { onset, sharpEnough, shapeChanged, strongGate } = gateOut;
   // 近似帧（2026-09-23）：电平到了门限的八成、却没被认成起音 → 记下被否决的原因。
@@ -1157,7 +1155,7 @@ function micTickBody() {
       flux: Number(flux.toFixed(3)), hfFlux: Number(hfFlux.toFixed(3)),
       hfBand: Number(hfBandRise.toFixed(2)),
       tech,
-      repeat: repeatSame, expect: (notes && notes[noteIdx]) ? midiToNameOf(notes[noteIdx].midi) : null,
+      repeat: repeatSame, expect: (notes && notes[session.noteIdx]) ? midiToNameOf(notes[session.noteIdx].midi) : null,
     });
     const nowSpec = getFluxSpec();
     const prevSpec = getBeforeFluxSpec();
@@ -1261,7 +1259,7 @@ function micTickBody() {
       // 1 弦那一格单独放宽（用户口径：**只在谱面这一格是 1 弦时**放宽，别处不放）：
       // 只把"周期性"这条线降一档（0.42 → 0.25）；电平、形状、间隔一律不动。
       // 敲桌子/风那类 clarity 通常 <0.2，照样过不来；1 弦真音在叠音里常掉到 0.3 上下，这一档正好救它。
-      const expStr1 = !!(notes && notes[noteIdx] && notes[noteIdx].string === 1);
+      const expStr1 = !!(notes && notes[session.noteIdx] && notes[session.noteIdx].string === 1);
       const clarMin = expStr1 ? (CFG.pluckClarityMinLow || 0.25) : CFG.pluckClarityMin;
       const byClarity = (a.pitch.clarity > clarMin) && (a.pitch.hz > CFG.pluckMinHz);
       // ② 谐波墙说得算：数不出周期，但"谐波成串"（叠音里 YIN 会放弃，墙却立着）
@@ -1284,7 +1282,7 @@ function micTickBody() {
         try {
           const n = 1 << Math.floor(Math.log2(Math.min(8192, buf.length)));
           const srNow = srRate();
-          const expMidi = notes && notes[noteIdx] ? notes[noteIdx].midi : 60;
+          const expMidi = notes && notes[session.noteIdx] ? notes[session.noteIdx].midi : 60;
           const expHz = 440 * Math.pow(2, (expMidi - 69) / 12);
           const sp = spectrumOf(buf.subarray(buf.length - n));
           hnr = harmonicity(sp, srNow, n, expHz);
@@ -1365,7 +1363,7 @@ function micTickBody() {
         setVerdict(pass ? `✓ ${c.name}` : `⚠ ${c.name} 里有和弦外音（约 ${r.outsiders[0] ? r.outsiders[0].hz : '?'}Hz），继续`,
           pass ? 'ok' : 'bad');
       }
-    } else if (notes && noteIdx < notes.length) {
+    } else if (notes && session.noteIdx < notes.length) {
       const onsetSec = (now - micStartedAt) / 1000;
       // 对齐参考只记时刻 —— **不丢弃这个起音**。
       // （原来这里直接 return，于是"用户弹的第一个音"永远不判。用户实测确认：
@@ -1378,7 +1376,7 @@ function micTickBody() {
       //   去匹配旁边另一个音、把错音判成对。用户当场就说"修了个什么出来"。撤掉。）
       // 这条"按顺序"的老规矩有一个已知弱点（漏检一次后面全体错开一位），要改就得**连光标
       // 的推进方式一起改**（让光标也按同一个规则走），不能只改一半 —— 见思路整理第 3 节。
-      let best = noteIdx;
+      let best = session.noteIdx;
  let devMs = null;
  // ⚠ 2026-09-24（用户报"全弹快没有提示"）：跟节拍模式下**逐音时间账**要真的算。
  //   口径（音驱动，不改"哪个音"的匹配）：拿**这一下与上一拨的间隔**去比**谱面这两格的间隔** ——
@@ -1402,7 +1400,7 @@ function micTickBody() {
         // 第一下 = 时间轴原点：把整条谱面时间轴对齐到用户这一下（第一个音以他为准）
         if (!tempo().isAnchored()) {
           tempo().anchor(elapsed);
-          noteIdx = 0;
+          session.noteIdx = 0;
           highlightCurrent();
           const pickup = tempo().pickupCount();
           setVerdict(`起手对齐：以这一下为第 1 个音（${midiToNameOf(notes[0].midi)}）`
@@ -1458,7 +1456,7 @@ function micTickBody() {
           return;
         }
         best = pick;
-        noteIdx = pick;            // 只是把"当前音"对齐到这一下；光标仍由时钟驱动
+        session.noteIdx = pick;            // 只是把"当前音"对齐到这一下；光标仍由时钟驱动
         devMs = elapsed - tempo().at(pick);
         if (!pickInWin) {
           // 窗外但音对（弹早/弹晚）→ 先认下，判定之后把整条时间轴对齐到你这一下
@@ -1706,7 +1704,7 @@ function micTickBody() {
           if (!exp) { stopMic(); return; }      // 跳过去的是最后一个音 → 收尾，别让后面读空
           candMatch = r2;
           candSelf = r2.self; candRival = r2.rival; candBest = r2.best;
-          noteIdx = best;
+          session.noteIdx = best;
         }
       }
       let diffSpec = spec;
@@ -2378,13 +2376,13 @@ function micTickBody() {
     $('bad').textContent = session.bad;
     $('pos').textContent = songKind === 'chords'
       ? `${Math.min(chordPractice.idx + 1, (chordPractice.data.chords.length))}/${chordPractice.data.chords.length}`
-      : `${Math.min(noteIdx, notes.length)}/${notes.length}`;
+      : `${Math.min(session.noteIdx, notes.length)}/${notes.length}`;
     // 光标跟着谱面时间走（不是跟着你弹了几声走）
     // 光标（用高亮当光标）：只在判完一个音之后才挪 —— 你不弹它就不动。
     highlightCurrent();
     // 光标提示：告诉用户"下一个该弹什么"，跟弹时不用猜
-    if (songKind === 'heyjude' && notes && noteIdx < notes.length) {
-      const nx = notes[noteIdx];
+    if (songKind === 'heyjude' && notes && session.noteIdx < notes.length) {
+      const nx = notes[session.noteIdx];
       $('next').innerHTML = `下一个：<b>${midiToNameOf(nx.midi)}</b>（${nx.string}弦 ${nx.fret}品）`;
     } else if (songKind === 'chords' && chordPractice.data && chordPractice.data.chords[chordPractice.idx]) {
       $('next').innerHTML = `当前和弦：<b>${chordPractice.data.chords[chordPractice.idx].name}</b>`;
@@ -2454,8 +2452,8 @@ function slotEndIdx(i) {
 function advanceNote() {
   // 按谱面间距设"下一次至少隔多久才算新的拨弦"：
   // 快音段（间距 150ms）约 80ms 后可再触发，慢音段最多等到 160ms。
-  const prevNote = notes && notes[noteIdx];
-  const nextN = notes && notes[noteIdx + 1];
+  const prevNote = notes && notes[session.noteIdx];
+  const nextN = notes && notes[session.noteIdx + 1];
   const gapMs = (nextN && prevNote) ? Math.max(0, (nextN.t - prevNote.t) * 1000) : 200;
   // 连续相同音时把间隔再压缩（否则第二下会被当成余响忽略掉）
   const same = !!(nextN && prevNote && nextN.midi === prevNote.midi);
@@ -2472,16 +2470,16 @@ function advanceNote() {
       : Math.min(160, Math.max(same ? 55 : 70, gapMs * (same ? 0.35 : 0.55))));
   // 不设延音期：谱面的延音只是"这个音响得久"，不代表你要再弹一次，
   // 也不代表接下来不能判定。判定只跟"你拨了几下"有关。
-  noteIdx++;
+  session.noteIdx++;
   noteClockStart = performance.now();
   heardInWindow = false;
-  $('pos').textContent = `${Math.min(noteIdx, (notes || []).length)}/${(notes || []).length}`;
-  if (noteIdx >= (notes || []).length) {
+  $('pos').textContent = `${Math.min(session.noteIdx, (notes || []).length)}/${(notes || []).length}`;
+  if (session.noteIdx >= (notes || []).length) {
     finishSession();
     return;
   }
   highlightCurrent();
-  const nx = notes[noteIdx];
+  const nx = notes[session.noteIdx];
   // ── 技巧：下一个音如果带 tech 标记，就在谱面该响的时刻自动判定它 ────────────
   // 只有一个起音（拨/击/滑的那一下），第二个音靠音高确认 —— 不再要求第二次起音。
   techDueMs = 0;
@@ -2490,7 +2488,7 @@ function advanceNote() {
     // 真机实测落地时间：击弦/勾弦约 170ms、滑音约 270~350ms（滑音是连续爬音，
     // 采样太早会量到"滑到一半"的音，判成错音）。
     const techMin = nx.tech === 'slide' ? 520 : 250;
-    const dtMs = Math.max(0, (nx.t - (notes[noteIdx - 1] || nx).t) * 1000);
+    const dtMs = Math.max(0, (nx.t - (notes[session.noteIdx - 1] || nx).t) * 1000);
     const at = onsetAtMs + Math.max(techMin, Math.min(700, dtMs));
     techDueMs = Math.max(performance.now() + 40, at);
     techRefHz = (typeof lastJudgeHz === 'number' && lastJudgeHz > 40) ? lastJudgeHz : 0;
@@ -2514,18 +2512,18 @@ async function startMic() {
   tuneDown = !!($('tuneDown') && $('tuneDown').checked);
   userBpm = Number($('speed') && $('speed').value) || userBpm || 76;
   // 从哪里开始：
-  //   · 默认**永远从第一个音开始** —— 不然中途停过一遍，noteIdx 残留，
+  //   · 默认**永远从第一个音开始** —— 不然中途停过一遍，session.noteIdx 残留，
   //     下一遍就从中间接着来（用户实测"点跟弹还是从第二小节开始、第一个音根本没在待测里"）；
   //   · 只有**这一遍之前点过谱面上某个音**，才从那儿开始练那一段。
   //     这条以前是坏的：点哪个音都对不上，因为"光标那份谱面格子"和"判定那份清单"
   //     错开了一位（117 vs 118）。现在两边是同一份清单（buildTickMap → mapSequenceToSlots，
   //     点第几格就是第几个音），而且跟弹进行中点谱面**不会再偷偷改起点**（见 beatMouseDown）。
   session.resetWrongList(); session.resetWrongNoted();
-  if (!userPickedStart || !(noteIdx >= 0 && noteIdx < (notes || []).length)) noteIdx = 0;
-  userPickedStart = false;         // 只认"这一次点击"，下一遍仍旧从头
-  if (notes && notes[noteIdx] && $('next')) {
-    $('next').innerHTML = `下一个：<b>${midiToNameOf(notes[noteIdx].midi)}</b>`
-      + `（${notes[noteIdx].string}弦 ${notes[noteIdx].fret}品）`;
+  if (!session.pickedStart || !(session.noteIdx >= 0 && session.noteIdx < (notes || []).length)) session.noteIdx = 0;
+  session.pickedStart = false;         // 只认"这一次点击"，下一遍仍旧从头
+  if (notes && notes[session.noteIdx] && $('next')) {
+    $('next').innerHTML = `下一个：<b>${midiToNameOf(notes[session.noteIdx].midi)}</b>`
+      + `（${notes[session.noteIdx].string}弦 ${notes[session.noteIdx].fret}品）`;
   }
   session.resetWrongList();
   slog.reset();
@@ -2615,8 +2613,8 @@ $('mic').onclick = () => (micTimer ? (stopMic(), setVerdict('已停止')) : star
 // 只跳一格、不判、不计数（不是"你弹错了"，是"谱面这一格不算"）。
 if ($('skip')) {
   $('skip').onclick = () => {
-    if (phase !== 'waiting' || !notes || !notes[noteIdx]) return;
-    const skipped = midiToNameOf(notes[noteIdx].midi);
+    if (phase !== 'waiting' || !notes || !notes[session.noteIdx]) return;
+    const skipped = midiToNameOf(notes[session.noteIdx].midi);
     advanceNote();
     setVerdict(`已跳过谱面这一格（${skipped}）—— 继续弹下一个`, '');
   };

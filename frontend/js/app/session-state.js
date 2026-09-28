@@ -17,9 +17,13 @@
 //     "测不准"（最优解贴在搜索边界）不算弹错，单独一栏。
 //   timingDevs / earlyCount / lateCount —— 跟节拍才有：每个音的偏差（ms，负=抢拍），
 //     以及抢拍、拖拍各几处。不和音准合成一个"对/错"：用户被标红时要能看出错在音还是错在拍。
+//   noteIdx / pickedStart / holdUntilMs —— 这一遍弹到哪儿了。
+//     noteIdx 是判定清单里的下标（每次开始、切曲目都会归零）；
+//     pickedStart = "这一遍之前点过谱面某处当起点"（只认一次，开始后立刻清掉）；
+//     holdUntilMs = 上一个音的延音期（判定链搬进来之前只剩清零）。
 //
 // 之后往里搬的顺序（见结构.md）：
-//   noteIdx / userPickedStart / holdUntilMs → （最后才是）判定链上那些。
+//   （最后才是）判定链上那些。
 
 export function createSessionState() {
   let countinPeaks = 0;        // 倒数四拍里听见的响动数
@@ -31,6 +35,9 @@ export function createSessionState() {
   let unclearCount = 0;        // "测不准"（最优解贴在搜索边界）——不算弹错
   let timingDevs = [];         // 每个音的偏差（ms，负 = 抢拍）
   let earlyCount = 0, lateCount = 0;
+  let noteIdx = 0;             // 当前该弹第几个音（判定清单里的下标）
+  let pickedStart = false;     // 这一遍之前点过谱面某处当起点（只认一次）
+  let holdUntilMs = 0;         // 上一个音的延音期：这段时间内不判下一个音
 
   return {
     get countinPeaks() { return countinPeaks; },
@@ -73,5 +80,13 @@ export function createSessionState() {
     countEarly() { earlyCount++; },
     countLate() { lateCount++; },
     resetTiming() { timingDevs = []; earlyCount = 0; lateCount = 0; },   // 开始新一遍时清
+
+    /** 这一遍弹到哪儿了 */
+    get noteIdx() { return noteIdx; },
+    set noteIdx(v) { noteIdx = v; },
+    get pickedStart() { return pickedStart; },
+    set pickedStart(v) { pickedStart = v; },
+    get holdUntilMs() { return holdUntilMs; },
+    set holdUntilMs(v) { holdUntilMs = v; },
   };
 }
