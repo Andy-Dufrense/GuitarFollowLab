@@ -11,11 +11,11 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0928-1210';
+const BUILD = '0928-1440';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
-import { rms, spectrumOf } from './engine/dsp.js?v=0928-1210';
+import { rms, spectrumOf } from './engine/dsp.js?v=0928-1440';
 import * as audio from './audio.js';
 import {
   track, fluxRelOf, resetAnalysis, novelSpectrum, verifyExpectedNote, chordOutsiders,
@@ -24,12 +24,12 @@ import {
   lowBandRiseOf,
   shapeFluxOf, harmonicity, spectralSparsity, spectralFlatness, spectralPeakiness, f0SeriesFromDiff,
   dominantF0InBand, strongestF0InBand, diffMags, matchNoteByCandidates, readPluckF0,
-} from './engine/analysis.js?v=0928-1210';
-import { CFG, FLUX_N } from './engine/config.js?v=0928-1210';
+} from './engine/analysis.js?v=0928-1440';
+import { CFG, FLUX_N } from './engine/config.js?v=0928-1440';
 import { createMetro } from './metro-core.js';
 // 分层：检测能力（起音层 / 判定层）各自一个文件，阈值也都收在那两个文件里。
-import { decideOnset, ONSET } from './engine/onset.js?v=0928-1210';
-import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js?v=0928-1210';
+import { decideOnset, ONSET } from './engine/onset.js?v=0928-1440';
+import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js?v=0928-1440';
 // 光标层：谱面格子 ↔ 判定清单 的对号（纯函数，单独一个文件）
 import { collectScoreSlots, mapSequenceToSlots } from './app/cursor.js';
 // 跟节拍层（状态机 + 拍点 + 提示音）—— 这一层只通过回调跟页面打交道
