@@ -11,11 +11,11 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0928-1536';
+const BUILD = '0928-1537';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
-import { rms, spectrumOf } from './engine/dsp.js?v=0928-1536';
+import { rms, spectrumOf } from './engine/dsp.js?v=0928-1537';
 import * as audio from './audio.js';
 import {
   track, fluxRelOf, resetAnalysis, novelSpectrum, verifyExpectedNote, chordOutsiders,
@@ -24,12 +24,12 @@ import {
   lowBandRiseOf,
   shapeFluxOf, harmonicity, spectralSparsity, spectralFlatness, spectralPeakiness, f0SeriesFromDiff,
   dominantF0InBand, strongestF0InBand, diffMags, matchNoteByCandidates, readPluckF0,
-} from './engine/analysis.js?v=0928-1536';
-import { CFG, FLUX_N } from './engine/config.js?v=0928-1536';
+} from './engine/analysis.js?v=0928-1537';
+import { CFG, FLUX_N } from './engine/config.js?v=0928-1537';
 import { createMetro } from './metro-core.js';
 // 分层：检测能力（起音层 / 判定层）各自一个文件，阈值也都收在那两个文件里。
-import { decideOnset, ONSET } from './engine/onset.js?v=0928-1536';
-import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js?v=0928-1536';
+import { decideOnset, ONSET } from './engine/onset.js?v=0928-1537';
+import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js?v=0928-1537';
 // 光标层：谱面格子 ↔ 判定清单 的对号（纯函数，单独一个文件）
 import { collectScoreSlots, mapSequenceToSlots } from './app/cursor.js';
 // 跟节拍层（状态机 + 拍点 + 提示音）—— 这一层只通过回调跟页面打交道
@@ -162,7 +162,7 @@ function initAlphaTab() {
         // 从新的地方开始练：**旧的谱面标记要清掉**。
         // （不然新一段和上一段的绿/红混在一起，看不出这次练到哪。）
         if ($('marks')) $('marks').innerHTML = '';
-        wrongList = [];
+        session.resetWrongList();
         unclearCount = 0; missed = 0;
         $('wrongs').textContent = '';
         $('good').textContent = '0'; $('bad').textContent = '0';
@@ -546,7 +546,7 @@ let unclearCount = 0;      // "测不准"（最优解贴在搜索边界）——
 let devHistory = [];       // 本次演奏的音准偏差（用来估"这把琴这会儿整体偏高/偏低多少"）
 const devByString = {};    // 按弦分别估：吉他每根弦漂移不一样，整体中位数会互相抵消
 const median = (a) => { const s = a.slice().sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
-let wrongList = [];
+// wrongList 已搬进 ./app/session-state.js（读 .length/.join/.slice、记 noteWrong()）。
 // wrongNoted / missNoted 已搬进 ./app/session-state.js：
 //   读 .has(i) / 记 .add(i)；漏拍用 session.markMissed(i)（-1 = 没记过）。
 let firstJudgeMs = null;       // 跟节拍：第一个被认到的音（总时间的起点）
@@ -764,8 +764,8 @@ function tempo() {
       onMiss: ({ index, note, atMs, winFrom, winTo }) => {
         missed++;
         bad++;
-        wrongList.push(`第${(note.measure || 0) + 1}小节 漏了${midiToNameOf(note.midi)}（时间窗内没弹）`);
-        $('wrongs').textContent = '弹错：' + wrongList.join('、');
+        session.noteWrong(`第${(note.measure || 0) + 1}小节 漏了${midiToNameOf(note.midi)}（时间窗内没弹）`);
+        $('wrongs').textContent = '弹错：' + session.wrongList.join('、');
         $('missed').textContent = missed;
         $('bad').textContent = bad;
         markNote(index, 'bad');
@@ -852,7 +852,7 @@ function renderCells() {
             if (c.classList) { c.classList.remove('ok'); c.classList.remove('bad'); }
           });
         }
-        wrongList = []; session.resetWrongNoted();
+        session.resetWrongList(); session.resetWrongNoted();
         unclearCount = 0; missed = 0;
         $('wrongs').textContent = '';
         $('good').textContent = '0'; $('bad').textContent = '0';
@@ -1693,8 +1693,8 @@ function micTickBody() {
         if (r2.self && r2.self.mismatch < 190 && r2.self.mismatch + 60 < candSelf.mismatch) {
           // 当前这个音：你没弹它 → 记"漏"（不是判你弹错）
           missed++;
-          wrongList.push(`第${(exp.measure || 0) + 1}小节 漏了${midiToNameOf(exp.midi)}（跳过去了）`);
-          $('wrongs').textContent = '弹错/漏：' + wrongList.join('、');
+          session.noteWrong(`第${(exp.measure || 0) + 1}小节 漏了${midiToNameOf(exp.midi)}（跳过去了）`);
+          $('wrongs').textContent = '弹错/漏：' + session.wrongList.join('、');
           $('missed').textContent = missed;
           markNote(best, 'bad');
           slog.session({
@@ -2342,12 +2342,12 @@ function micTickBody() {
       // 错音标记：先记账再往下走 —— advanceNote() 会在最后一个音上收尾并出总结，
       // 记账排在它后面的话，最后一个音的错误就进不了总结里的"要改的地方"。
       if (!passSlot && !unclear) {
-        if (firstWrong) wrongList.push(slotBad
+        if (firstWrong) session.noteWrong(slotBad
           ? `第${(exp.measure || 0) + 1}小节 这一格少/错了 ${midiToNameOf(slotBad.midi)}`
           : seenSame
           ? `第${(exp.measure || 0) + 1}小节 ${midiToNameOf(exp.midi)} 偏得比较多`
           : `第${(exp.measure || 0) + 1}小节 弹成约${midiToNameOf(seenMidi)}（要${midiToNameOf(exp.midi)}）`);
-        $('wrongs').textContent = '弹错：' + wrongList.join('、');
+        $('wrongs').textContent = '弹错：' + session.wrongList.join('、');
       }
       const judgedNo = best + 1;
       // 实时诊断：这一个音是怎么判的（wait 只看音，tempo 连时间窗和偏差一起给）
@@ -2408,8 +2408,8 @@ function finishSession() {
   const ok = acc >= 90;                        // 正确率 ≥90% 这份作业算完成
   const head = `整段弹完 —— 对 ${good} ／ 错 ${bad} ／ 测不准 ${unclearCount}`
     + `　正确率 ${acc}%（${ok ? '✅ 这份作业算完成' : '还没到 90%，建议重练'}）`;
-  const todo = wrongList.length
-    ? `　要改的地方：${wrongList.slice(0, 5).join('、')}${wrongList.length > 5 ? ' 等' : ''}`
+  const todo = session.wrongList.length
+    ? `　要改的地方：${session.wrongList.slice(0, 5).join('、')}${session.wrongList.length > 5 ? ' 等' : ''}`
     : '　（没有错音，漂亮）';
   // 跟节拍才有的时间账：偏差中位数 / 最大 / 抢拍几处 / 拖拍几处。
   // 不和音准合成一个"对/错"——用户被标红时要能看出错在音还是错在拍。
@@ -2520,14 +2520,14 @@ async function startMic() {
   //     这条以前是坏的：点哪个音都对不上，因为"光标那份谱面格子"和"判定那份清单"
   //     错开了一位（117 vs 118）。现在两边是同一份清单（buildTickMap → mapSequenceToSlots，
   //     点第几格就是第几个音），而且跟弹进行中点谱面**不会再偷偷改起点**（见 beatMouseDown）。
-  wrongList = []; session.resetWrongNoted();
+  session.resetWrongList(); session.resetWrongNoted();
   if (!userPickedStart || !(noteIdx >= 0 && noteIdx < (notes || []).length)) noteIdx = 0;
   userPickedStart = false;         // 只认"这一次点击"，下一遍仍旧从头
   if (notes && notes[noteIdx] && $('next')) {
     $('next').innerHTML = `下一个：<b>${midiToNameOf(notes[noteIdx].midi)}</b>`
       + `（${notes[noteIdx].string}弦 ${notes[noteIdx].fret}品）`;
   }
-  wrongList = [];
+  session.resetWrongList();
   slog.reset();
   // （onsetLog 由上面的 slog.reset() 一起清）
   timingDevs = []; earlyCount = 0; lateCount = 0;

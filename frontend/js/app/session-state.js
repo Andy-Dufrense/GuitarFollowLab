@@ -12,8 +12,9 @@
 //   wrongNoted —— "这个音已经记过错了吗"。同一个音只记第一次错，停了重弹的那几次不再累加，
 //     否则一声咳嗽 / 一次听不准就能把错误数刷到十几。读用 .has(i)、记用 .add(i)。
 //   missNoted —— "这个音已经记过漏拍/换和弦不流畅了吗"（只记一次，存的是第几个音，-1 = 没记过）。
+//   wrongList —— 弹错清单（每条一句人话）。收尾时"要改的地方"就是它（slice 0..5）。
 //
-// 之后往里搬的顺序（见结构.md）：wrongList →
+// 之后往里搬的顺序（见结构.md）：
 //   good / bad / missed / unclearCount / earlyCount / lateCount / timingDevs →
 //   noteIdx / userPickedStart / holdUntilMs → （最后才是）判定链上那些。
 
@@ -21,6 +22,7 @@ export function createSessionState() {
   let countinPeaks = 0;        // 倒数四拍里听见的响动数
   let wrongNoted = new Set();  // 已经记过错的音（同一个音只记第一次错）
   let missNoted = -1;          // 这个音已经记过"漏拍/换和弦不流畅"了吗（只记一次）
+  let wrongList = [];          // 弹错清单（每条一句人话，收尾时取前 5 条给用户看）
 
   return {
     get countinPeaks() { return countinPeaks; },
@@ -36,5 +38,10 @@ export function createSessionState() {
     /** 漏拍 / 换和弦不流畅：只记一次，记的是"第几个音" */
     get missNoted() { return missNoted; },
     markMissed(idx) { missNoted = idx; },
+
+    /** 弹错清单：读 .length / .join / .slice；记一条用 noteWrong() */
+    get wrongList() { return wrongList; },
+    resetWrongList() { wrongList = []; },
+    noteWrong(text) { wrongList.push(text); },
   };
 }
