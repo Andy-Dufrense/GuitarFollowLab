@@ -11,7 +11,7 @@
 // 依赖全部注入（$ / audio / session / slog / setVerdict / flashBeat / scoreView /
 // chordPractice / arpCells / midiToNameOf），模块内部不读全局。
 
-import { rms, spectrumOf } from '../engine/dsp.js?v=0928-1830';
+import { rms, spectrumOf } from '../engine/dsp.js?v=0928-1835';
 import {
   track, fluxRelOf, resetAnalysis, novelSpectrum, verifyExpectedNote, chordOutsiders,
   getFluxSpec, getBeforeFluxSpec, estimateF0Near, estimateF0ByPeaks, hfFluxRelOf,
@@ -20,10 +20,10 @@ import {
   shapeFluxOf, harmonicity, spectralSparsity, spectralFlatness, spectralPeakiness, f0SeriesFromDiff,
   dominantF0InBand, strongestF0InBand, diffMags, matchNoteByCandidates, readPluckF0,
   spectralMagAt,
-} from '../engine/analysis.js?v=0928-1830';
-import { CFG, FLUX_N } from '../engine/config.js?v=0928-1830';
-import { decideOnset, ONSET } from '../engine/onset.js?v=0928-1830';
-import { judgeNote, decideByCandidates, JUDGE } from '../engine/judger.js?v=0928-1830';
+} from '../engine/analysis.js?v=0928-1835';
+import { CFG, FLUX_N } from '../engine/config.js?v=0928-1835';
+import { decideOnset, ONSET } from '../engine/onset.js?v=0928-1835';
+import { judgeNote, decideByCandidates, JUDGE } from '../engine/judger.js?v=0928-1835';
 import { createTempoLayer } from './tempo.js';
 import { diag, resetDiag } from './diag.js';
 
@@ -1847,7 +1847,15 @@ function concludeNote({ best, candBest, centsP, devMs, exp, midiP, pass, passSlo
   // 这样环境里的杂音（旁边的说话、咳嗽）最多让你重弹一次，
   // 不会把后面整条对号顶错位（"弹快一点就跟不上"的根也在这儿）。
   // 判过 → 一次前进过**整格**（双音/三音一次拨弦就过这一格）；判错停在原地
-  if (passSlot) { for (let k = 0; k < slotSize; k++) advanceNote(); }
+  // ⚠ 2026-09-28：**跟节拍模式判错也要往下走**。用户 9-21 定的口径（`思路.md`）：
+  //   「原速（跟弹式）：错了**不停**，只标记对错」。但"光标按时间走"原来在
+  //   `tempo().tick()` 里，而 9-23 为了不让"窗口过期算成错"把 tick() 停用了
+  //   （见上面 tempo 那段的说明）—— 顺带把"光标按时间走"也停了，
+  //   于是跟节拍模式变成**和慢练一样"判错就停"**。
+  //   真机证据：6415 那段录音（29.3s、55 个起音）在第 12 格被重判 **14 次**、
+  //   第 13 格 **11 次**，**25 个起音（45%）被吃掉**，页面只走到第 30 格。
+  //   慢练（等我弹）保持原样：判错停下重弹（用户 9-23 明确"弹错停下重弹是对的"）。
+  if (passSlot || modeKind === 'tempo') { for (let k = 0; k < slotSize; k++) advanceNote(); }
   else scoreView.highlightCurrent();
   if (scoreView.api && exp.t != null) scoreView.api.timePosition = (exp.t + (exp.dur || 0)) * 1000;
 }
