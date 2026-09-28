@@ -11,11 +11,11 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0928-1440';
+const BUILD = '0928-1536';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
-import { rms, spectrumOf } from './engine/dsp.js?v=0928-1440';
+import { rms, spectrumOf } from './engine/dsp.js?v=0928-1536';
 import * as audio from './audio.js';
 import {
   track, fluxRelOf, resetAnalysis, novelSpectrum, verifyExpectedNote, chordOutsiders,
@@ -24,12 +24,12 @@ import {
   lowBandRiseOf,
   shapeFluxOf, harmonicity, spectralSparsity, spectralFlatness, spectralPeakiness, f0SeriesFromDiff,
   dominantF0InBand, strongestF0InBand, diffMags, matchNoteByCandidates, readPluckF0,
-} from './engine/analysis.js?v=0928-1440';
-import { CFG, FLUX_N } from './engine/config.js?v=0928-1440';
+} from './engine/analysis.js?v=0928-1536';
+import { CFG, FLUX_N } from './engine/config.js?v=0928-1536';
 import { createMetro } from './metro-core.js';
 // 分层：检测能力（起音层 / 判定层）各自一个文件，阈值也都收在那两个文件里。
-import { decideOnset, ONSET } from './engine/onset.js?v=0928-1440';
-import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js?v=0928-1440';
+import { decideOnset, ONSET } from './engine/onset.js?v=0928-1536';
+import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js?v=0928-1536';
 // 光标层：谱面格子 ↔ 判定清单 的对号（纯函数，单独一个文件）
 import { collectScoreSlots, mapSequenceToSlots } from './app/cursor.js';
 // 跟节拍层（状态机 + 拍点 + 提示音）—— 这一层只通过回调跟页面打交道
@@ -547,9 +547,8 @@ let devHistory = [];       // 本次演奏的音准偏差（用来估"这把琴�
 const devByString = {};    // 按弦分别估：吉他每根弦漂移不一样，整体中位数会互相抵消
 const median = (a) => { const s = a.slice().sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
 let wrongList = [];
-// 已经记过错的音（同一个音只记第一次错 —— 停了重弹的那几次不再累加）
-let wrongNoted = new Set();
-let missNoted = -1;            // 这个音已经记过"漏拍/换和弦不流畅"了吗（只记一次）
+// wrongNoted / missNoted 已搬进 ./app/session-state.js：
+//   读 .has(i) / 记 .add(i)；漏拍用 session.markMissed(i)（-1 = 没记过）。
 let firstJudgeMs = null;       // 跟节拍：第一个被认到的音（总时间的起点）
 let lastJudgeMs = null;        // 跟节拍：最后一个判完的音（总时间的终点）
 // 时间片模型的三个量：当前音自己的时钟起点、它的时间窗长度、以及"这个窗里听没听到"
@@ -853,7 +852,7 @@ function renderCells() {
             if (c.classList) { c.classList.remove('ok'); c.classList.remove('bad'); }
           });
         }
-        wrongList = []; wrongNoted = new Set();
+        wrongList = []; session.resetWrongNoted();
         unclearCount = 0; missed = 0;
         $('wrongs').textContent = '';
         $('good').textContent = '0'; $('bad').textContent = '0';
@@ -1000,20 +999,20 @@ function micTickBody() {
   //   · "换和弦不流畅"**只有和弦谱**用，别的谱记"漏拍"；
   //   · **等我弹模式只判对错**，不记漏拍、不记时机 —— 你停下来想多久都不算错。
   if (modeKind === 'tempo' && phase === 'waiting' && lastOnsetMs > 0
-      && notes && notes[noteIdx] && missNoted !== noteIdx) {
+      && notes && notes[noteIdx] && session.missNoted !== noteIdx) {
     const prevNote = notes[noteIdx - 1];
     const ioiMs = prevNote ? Math.max(0.15, notes[noteIdx].t - prevNote.t) * 1000 : 400;
     const beatMs = (60 / (userBpm || 76)) * 1000;
     const limitMs = Math.max(700, Math.max(1.5 * ioiMs, 2 * beatMs));
     if (now - lastOnsetMs > limitMs) {
-      missNoted = noteIdx;
+      session.markMissed(noteIdx);
       const isChordScore = songKind === 'chords'
         || !!(notes[noteIdx].chord || (prevNote && prevNote.chord));
       const isChange = isChordScore && (!prevNote
         || (notes[noteIdx].measure || 0) !== (prevNote.measure || 0)
         || !!(notes[noteIdx].chord && prevNote.chord && notes[noteIdx].chord !== prevNote.chord));
       missed++;
-      if (!wrongNoted.has(noteIdx)) { bad++; wrongNoted.add(noteIdx); }
+      if (!session.wrongNoted.has(noteIdx)) { bad++; session.wrongNoted.add(noteIdx); }
       markNote(noteIdx, 'bad');
       if ($('missed')) $('missed').textContent = String(missed);
       if ($('bad')) $('bad').textContent = String(bad);
@@ -2314,12 +2313,12 @@ function micTickBody() {
           : `${midiToNameOf(exp.midi + pitchShift())} ${centsP > 0 ? '+' : ''}${Math.round(centsP)}音分`);
       // 同一个音只记第一次错（用户口径）：停了重弹的那几次不再累加错误数，
       // 否则一声咳嗽 / 一次听不准就能把错误数刷到十几。
-      const firstWrong = !passSlot && !unclear && !wrongNoted.has(best);
+      const firstWrong = !passSlot && !unclear && !session.wrongNoted.has(best);
       // 跟节拍的总时间账：第一个被认到的音 → 最后一个判完的音
       if (firstJudgeMs == null) firstJudgeMs = onsetAtMs;
       lastJudgeMs = onsetAtMs;
       if (passSlot) good++;
-      else if (firstWrong) { bad++; wrongNoted.add(best); }
+      else if (firstWrong) { bad++; session.wrongNoted.add(best); }
       markNote(best, passSlot ? 'ok' : (unclear ? 'unclear' : 'bad'));   // 谱面上标对错
       setVerdict(passSlot
         ? (slotSize > 1
@@ -2521,7 +2520,7 @@ async function startMic() {
   //     这条以前是坏的：点哪个音都对不上，因为"光标那份谱面格子"和"判定那份清单"
   //     错开了一位（117 vs 118）。现在两边是同一份清单（buildTickMap → mapSequenceToSlots，
   //     点第几格就是第几个音），而且跟弹进行中点谱面**不会再偷偷改起点**（见 beatMouseDown）。
-  wrongList = []; wrongNoted = new Set();
+  wrongList = []; session.resetWrongNoted();
   if (!userPickedStart || !(noteIdx >= 0 && noteIdx < (notes || []).length)) noteIdx = 0;
   userPickedStart = false;         // 只认"这一次点击"，下一遍仍旧从头
   if (notes && notes[noteIdx] && $('next')) {
