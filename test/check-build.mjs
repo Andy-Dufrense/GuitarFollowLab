@@ -29,6 +29,12 @@ scan('frontend/index.html', /follow-score\.js\?v=([^"']+)/g);
 for (const f of fs.readdirSync(path.join(house, 'frontend/js'))) {
   if (f.endsWith('.js')) scan(`frontend/js/${f}`, /engine\/[a-z]+\.js\?v=([^'"]+)/g);
 }
+// ⚠ 2026-09-28：判定循环搬进了 frontend/js/app/judge-loop.js，它自己 import 了 engine/*，
+//   所以 app/ 下的模块也要一起检查（原来只扫 frontend/js 顶层）。
+const appDir = path.join(house, 'frontend/js/app');
+for (const f of fs.readdirSync(appDir)) {
+  if (f.endsWith('.js')) scan(`frontend/js/app/${f}`, /engine\/[a-z]+\.js\?v=([^'"]+)/g);
+}
 for (const f of fs.readdirSync(path.join(house, 'frontend/js/engine'))) {
   if (f.endsWith('.js')) scan(`frontend/js/engine/${f}`, /backend\/engine\/[a-z]+\.js\?v=([^'"]+)/g);
 }
@@ -40,6 +46,13 @@ for (const f of fs.readdirSync(path.join(house, 'frontend/js'))) {
   const t = fs.readFileSync(path.join(house, 'frontend/js', f), 'utf8');
   const bare = t.match(/from '\.\/engine\/[a-z]+\.js'/g) || [];
   if (bare.length) problems.push(`frontend/js/${f}: 有没带 ?v= 的 engine 导入 ${bare.length} 处`);
+}
+// app/ 下的模块用相对路径 import engine（../engine/…），检查口径同上
+for (const f of fs.readdirSync(appDir)) {
+  if (!f.endsWith('.js')) continue;
+  const t = fs.readFileSync(path.join(appDir, f), 'utf8');
+  const bare = t.match(/from '\.\.\/engine\/[a-z]+\.js'/g) || [];
+  if (bare.length) problems.push(`frontend/js/app/${f}: 有没带 ?v= 的 engine 导入 ${bare.length} 处`);
 }
 if (problems.length) {
   console.log('❌ 不一致：');
