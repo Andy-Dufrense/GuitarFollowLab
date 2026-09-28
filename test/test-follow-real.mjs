@@ -131,7 +131,7 @@ function FakeApi() {
 }
 globalThis.alphaTab = { AlphaTabApi: FakeApi, version: 'stub' };
 
-await import('../frontend/js/follow-score.js');
+await import('../frontend/js/product.js');
 if (process.env.VC_DEBUG) globalThis.__vcDebug = true;
 // 多音格（双音/三音）逐音证据：VC_MULTI_DIAG=1 只多打日志，不改判定
 if (process.env.VC_MULTI_DIAG) globalThis.__vcMultiDiag = 1;

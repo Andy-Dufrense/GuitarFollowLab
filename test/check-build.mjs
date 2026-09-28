@@ -7,9 +7,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const house = path.resolve(process.cwd());
-const buildSrc = fs.readFileSync(path.join(house, 'frontend/js/follow-score.js'), 'utf8');
+const buildSrc = fs.readFileSync(path.join(house, 'frontend/js/product.js'), 'utf8');
 const BUILD = (buildSrc.match(/const BUILD = '([^']+)'/) || [])[1];
-if (!BUILD) { console.error('找不到 frontend/js/follow-score.js 里的 BUILD'); process.exit(1); }
+if (!BUILD) { console.error('找不到 frontend/js/product.js 里的 BUILD'); process.exit(1); }
 
 const problems = [];
 const seen = [];
@@ -22,7 +22,8 @@ const scan = (file, re) => {
   }
 };
 
-scan('frontend/index.html', /follow-score\.js\?v=([^"']+)/g);
+// ⚠ 2026-09-28：入口从 follow-score.js 改名成 product.js（老页面叫 main.js，别用那名字）
+scan('frontend/index.html', /product\.js\?v=([^"']+)/g);
 // ⚠ 2026-09-28：老页面（main.js + judge/ui/state/exercises/follow/metronome 那几个）
 //   已经被产品页取代、整簇删掉了，`frontend/test/practice.html` 也跟着删了 ——
 //   这里原来会去读它，删完就 ENOENT。老页面不再有版本号要检查。

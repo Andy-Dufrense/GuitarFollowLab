@@ -11,7 +11,7 @@
 // 依赖全部注入（$ / audio / session / slog / setVerdict / flashBeat / scoreView /
 // chordPractice / arpCells / midiToNameOf），模块内部不读全局。
 
-import { rms, spectrumOf } from '../engine/dsp.js?v=0928-1815';
+import { rms, spectrumOf } from '../engine/dsp.js?v=0928-1830';
 import {
   track, fluxRelOf, resetAnalysis, novelSpectrum, verifyExpectedNote, chordOutsiders,
   getFluxSpec, getBeforeFluxSpec, estimateF0Near, estimateF0ByPeaks, hfFluxRelOf,
@@ -20,10 +20,10 @@ import {
   shapeFluxOf, harmonicity, spectralSparsity, spectralFlatness, spectralPeakiness, f0SeriesFromDiff,
   dominantF0InBand, strongestF0InBand, diffMags, matchNoteByCandidates, readPluckF0,
   spectralMagAt,
-} from '../engine/analysis.js?v=0928-1815';
-import { CFG, FLUX_N } from '../engine/config.js?v=0928-1815';
-import { decideOnset, ONSET } from '../engine/onset.js?v=0928-1815';
-import { judgeNote, decideByCandidates, JUDGE } from '../engine/judger.js?v=0928-1815';
+} from '../engine/analysis.js?v=0928-1830';
+import { CFG, FLUX_N } from '../engine/config.js?v=0928-1830';
+import { decideOnset, ONSET } from '../engine/onset.js?v=0928-1830';
+import { judgeNote, decideByCandidates, JUDGE } from '../engine/judger.js?v=0928-1830';
 import { createTempoLayer } from './tempo.js';
 import { diag, resetDiag } from './diag.js';
 

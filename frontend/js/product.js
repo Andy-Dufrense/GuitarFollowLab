@@ -1,4 +1,8 @@
-// 产品页：谱面（alphaTab 渲染真实 .gp） + 试听 + 跟弹判定。
+// 产品页入口 product.js（2026-09-28 由 follow-score.js 改名 —— 老页面那个 main.js 别再用了）。
+//
+// 这里只做**装配**：建状态（session/slog）、建各层（scoreView / chordPractice / arpCells /
+// judge）、挂按钮事件、挂离线钩子、启动。跟弹判定循环整块在 ./app/judge-loop.js；
+// 谱面视图在 ./app/score-view.js；音格子/倒计时/节拍器在 ./app/arp-cells.js。
 //
 // 三条设计约束（都是手机优先）：
 //   1. 窄屏用横向布局（一行一行铺开，跟着光标滚），宽屏用整页布局；
@@ -11,7 +15,7 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0928-1815';
+const BUILD = '0928-1830';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 

@@ -1,4 +1,4 @@
-// 产品页自检：不开浏览器，用 DOM 桩把 frontend/js/follow-score.js 真加载一遍。
+// 产品页自检：不开浏览器，用 DOM 桩把入口 frontend/js/product.js 真加载一遍。
 //
 // 为什么需要它：页面上"按钮点不了"最常见的根因是 —— 模块里**前面某处抛异常**，
 // 后面挂按钮事件的代码根本没执行（整个模块死掉，但页面看起来是"活的"）。
@@ -92,7 +92,7 @@ globalThis.alphaTab = { AlphaTabApi: FakeApi, version: 'stub' };
 console.log('\n=== 加载产品页脚本（手机宽度 390px）===');
 let loadError = null;
 try {
-  await import('../frontend/js/follow-score.js');
+  await import('../frontend/js/product.js');
 } catch (e) {
   loadError = e;
 }

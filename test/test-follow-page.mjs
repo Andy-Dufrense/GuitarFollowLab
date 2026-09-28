@@ -265,7 +265,7 @@ async function runPage(label, plucks, untilMs = 6400, opts = {}) {
     for (let i = 0; i < 6; i++) addWind(AUDIO, 3.4 + i * 0.5, 0.5, opts.noiseLevel || 0.08, 1000 + i * 77);
   }
 
-  await import(`../frontend/js/follow-score.js?v=${++modN}`);
+  await import(`../frontend/js/product.js?v=${++modN}`);
   const $ = (id) => reg.get(id) || document.getElementById(id);
   // 有的场景要拿一份"假谱面"当 alphaTab 解析出来的结果（测光标那一层用）
   if (opts.score && globalThis.__vcSetScore) globalThis.__vcSetScore(opts.score, 0);
