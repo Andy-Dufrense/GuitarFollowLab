@@ -1,0 +1,31 @@
+# 统一行尾（2026-09-28 补）
+#
+# 背景：这一天发现仓库里的 JS 是**混行尾** —— 同一个文件里既有 CRLF 又有 LF
+# （follow-score.js 实测 1759 处 CRLF + 2786 处 LF）。后果是：
+# 随便改一行，diff 里就冒出十几处"整行"变化（提交 d671368 就是这样被污染的），
+# 真正改了什么反而看不清。
+#
+# 规矩：仓库里一律存 LF；检出到 Windows 时也不用转（这些代码浏览器和 node 都吃 LF，
+#       编辑器和 git 也都认）。这样 diff 里只剩真正的改动。
+* text=auto eol=lf
+
+# 批处理必须是 CRLF：cmd 解析 :label / goto 时对 LF 结尾不友好
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制：别做任何转换
+*.f32 binary
+*.m4a binary
+*.mp3 binary
+*.wav binary
+*.png binary
+*.jpg binary
+*.svg text eol=lf
+*.woff2 binary
+*.otf binary
+*.sf2 binary
+*.gp binary
+*.gp3 binary
+*.gp4 binary
+*.gp5 binary
+*.gp7 binary
