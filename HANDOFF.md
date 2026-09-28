@@ -250,13 +250,10 @@ HANDOFF.md                   本文件
 frontend/
   index.html                 页面
   live.css                   样式
-  js/main.js                 入口：装配 + 主循环 + 按钮接线
   js/config.js               全部可调参数和常量
   js/state.js                共享状态 + 练习进度
   js/audio.js                麦克风采集、音频时钟、权限查询
   js/analysis.js             信号分析：本底 / 双向失配 / 音准扫描 / YIN / 通量
-  js/judge.js                判定状态机：单音、和弦、变调夹、反馈文案
-  js/ui.js                   全部 DOM 渲染 + 麦克风诊断面板
   js/metronome.js            节拍器（用音频时钟排拍子）
   js/dsp.js                  DSP 内核：YIN / FFT / Chroma / 和弦比对
   js/exercises.js            五个模式的内容
@@ -271,7 +268,6 @@ test/
   test-dsp.mjs               DSP 内核（合成信号，不需要麦克风）
   test-live.mjs              实时链路端到端（假麦克风）
   test-detect.mjs            **检测能力专项**：手机频响 / 余响里的低音弦 / 密集连弹 / 不消音
-  test-mic-fail.mjs          麦克风开不了的三种情况，各该报什么
   test-bughunt.mjs           挖 bug：变调夹/技巧/转换/静音/噪声/练完/音色无关性
   probe-flux.mjs             诊断：起音判据的读数（电平抬升 / 频谱通量）
   probe-octave.mjs           诊断：和弦余响里的八度问题出在哪

@@ -651,8 +651,8 @@ const LOWEST_MIDI = Math.min(...OPEN_MIDI_LIST);
 const HIGHEST_MIDI = Math.max(...OPEN_MIDI_LIST) + 24;
 
 // 判过所需的领先倍数（相对比值，跟音色无关）。
-// 这个数是拿校准用例量出来的，不是拍的 —— 见 test/test-live.mjs 第 1、2、12 组
-// 和 test/test-detect.mjs 的 A、B 组。改打分函数就要重新标这一条。
+//   这个数是拿校准用例量出来的，不是拍的。原来的校准脚本随老页面在 2026-09-28 删掉了，
+//   以后改打分函数，用 gt-notes（真机 39 拨弦）+ 真机录音复核这两把尺子。
 const MARGIN_OK = 1.08;
 
 // 曾经想再加一条"像不像"的绝对下限（失配 ≤ 75 音分才算过），用音分当尺子。
@@ -729,7 +729,7 @@ export function matchNoteByCandidates(novel, sr, fftSize, targetMidi, capo = 0, 
 
   return {
     // 判过的线（相对比值，跟音色无关）。双向失配这把尺子比原来的谐波求和更利，
-    // 所以这个倍数重新标过 —— 校准用例见 test/test-live.mjs 的第 1、2、12 组。
+//   所以这个倍数重新标过（校准方法同上：gt-notes + 真机录音）。
     ok: mine > 0 && margin > MARGIN_OK,
     mine,
     runnerUp,
