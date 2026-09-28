@@ -6,7 +6,7 @@
 // 音频时钟和识别用的是同一个 AudioContext，所以"你偏了多少毫秒"能对得上。
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { CFG } from './engine/config.js?v=0924-2015';
+import { CFG } from './engine/config.js?v=0928-1210';
 import { S } from './state.js';
 import { getCtx } from './audio.js';
 import { $, setVerdict, paintBeats } from './ui.js';

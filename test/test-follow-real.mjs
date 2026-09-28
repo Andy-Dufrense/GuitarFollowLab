@@ -133,6 +133,8 @@ globalThis.alphaTab = { AlphaTabApi: FakeApi, version: 'stub' };
 
 await import('../frontend/js/follow-score.js');
 if (process.env.VC_DEBUG) globalThis.__vcDebug = true;
+// 多音格（双音/三音）逐音证据：VC_MULTI_DIAG=1 只多打日志，不改判定
+if (process.env.VC_MULTI_DIAG) globalThis.__vcMultiDiag = 1;
 if (process.env.VC_ONSET_DEBUG) globalThis.__vcOnsetDebug = true;
 globalThis.__vcNotes = [];
 globalThis.__onsetLog = [];
@@ -141,7 +143,13 @@ const $ = (id) => reg.get(id) || document.getElementById(id);
 
 console.log('\n=== 点「跟弹」，用真实录音跑完整段 ===');
 // VC_MODE=tempo：按"跟节拍"模式跑（默认是"等我弹"）
-if (process.env.VC_MODE) document.getElementById('mode').value = process.env.VC_MODE;
+// ⚠ 页面是在 `$('mode').onchange` 里把值接进 modeKind 的，只改 value 不触发它 = 白设
+//   （2026-09-28 实测：VC_MODE=tempo 和 wait 跑出来一模一样，就是栽在这儿）。
+if (process.env.VC_MODE) {
+  const modeEl = document.getElementById('mode');
+  modeEl.value = process.env.VC_MODE;
+  if (typeof modeEl.onchange === 'function') modeEl.onchange();
+}
 await $('mic').onclick();                       // 取麦 + 四拍 + 开始
 const totalMs = Math.ceil((AUDIO.length / SR) * 1000);
 let frames = 0;

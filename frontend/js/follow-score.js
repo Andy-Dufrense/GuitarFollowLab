@@ -11,11 +11,11 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0924-2015';
+const BUILD = '0928-1210';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
-import { rms, spectrumOf } from './engine/dsp.js?v=0924-2015';
+import { rms, spectrumOf } from './engine/dsp.js?v=0928-1210';
 import * as audio from './audio.js';
 import {
   track, fluxRelOf, resetAnalysis, novelSpectrum, verifyExpectedNote, chordOutsiders,
@@ -24,26 +24,27 @@ import {
   lowBandRiseOf,
   shapeFluxOf, harmonicity, spectralSparsity, spectralFlatness, spectralPeakiness, f0SeriesFromDiff,
   dominantF0InBand, strongestF0InBand, diffMags, matchNoteByCandidates, readPluckF0,
-} from './engine/analysis.js?v=0924-2015';
-import { CFG, FLUX_N } from './engine/config.js?v=0924-2015';
+} from './engine/analysis.js?v=0928-1210';
+import { CFG, FLUX_N } from './engine/config.js?v=0928-1210';
 import { createMetro } from './metro-core.js';
 // 分层：检测能力（起音层 / 判定层）各自一个文件，阈值也都收在那两个文件里。
-import { decideOnset, ONSET } from './engine/onset.js?v=0924-2015';
-import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js?v=0924-2015';
+import { decideOnset, ONSET } from './engine/onset.js?v=0928-1210';
+import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js?v=0928-1210';
 // 光标层：谱面格子 ↔ 判定清单 的对号（纯函数，单独一个文件）
 import { collectScoreSlots, mapSequenceToSlots } from './app/cursor.js';
 // 跟节拍层（状态机 + 拍点 + 提示音）—— 这一层只通过回调跟页面打交道
 import { createTempoLayer } from './app/tempo.js';
 // 实时诊断面板（页面层的一块）：只负责把一行行文字显示到 #diag
 import { diag, resetDiag, initDiag } from './app/diag.js';
+// 和弦练习（卡片 / 试听 / 四拍轮转）—— 2026-09-28 整块搬出去，行为不变
+import { createChordPractice } from './app/chord-practice.js';
 
 let api = null;            // alphaTab 实例（只建一次）
 let score = null;
 let songKind = 'heyjude';
-let chords = null;         // 和弦练习的数据
-let chordIdx = -1;
-let chordPick = -1;        // 用户点过的起始和弦（-1 = 没点过 → 从头开始）
-let beatTimer = 0;
+// 和弦练习自己那 5 个状态（数据 / 当前和弦 / 起点 / 定时器 / 试听上下文）
+// 已经搬进 ./app/chord-practice.js。`beat` 留在本文件 —— 它是和弦卡上的点
+// 和 alphaTab 光标**共用**的第几拍，存两份就会出现"卡片第 2 拍、光标第 3 拍"。
 let beat = 0;
 let userBpm = 76;
 // 变调夹 + 调弦：这两个都只是"期望音整体平移"——
@@ -392,104 +393,14 @@ function applyTrack(index) {
 }
 
 // ── 和弦练习部分 ─────────────────────────────────────────────────────────────
-async function loadChords() {
-  if (!chords) chords = await (await fetch('./data/chord_practice.json')).json();
-  return chords;
-}
-
-function renderChords() {
-  const box = $('chords');
-  box.innerHTML = '';
-  chords.chords.forEach((c, i) => {
-    const el = document.createElement('div');
-    el.className = 'c';
-    el.innerHTML = `<div class="nm">${c.name}</div><div class="vo">${c.voicing}</div>`
-      + '<div class="beat">○○○○</div>';
-    // 点和弦卡 = 从这一个和弦开始（试听/跟弹都按这个起点走）。
-    el.onclick = () => {
-      if (beatTimer) {
-        setVerdict('试听进行中：先点「试听」停下，再点你想从哪个和弦开始');
-        return;
-      }
-      chordIdx = i;
-      chordPick = i;               // 记住起点：点「试听」/「跟弹」都从这一个开始
-      paintChords();
-      $('pos').textContent = `${i + 1}/${chords.chords.length}`;
-      setVerdict(`这一遍从 <b>${c.name}</b> 开始（第 ${i + 1} 个和弦）`
-        + ` —— 点「试听」听一遍，或点「跟弹」开始判定`, '');
-    };
-    box.appendChild(el);
-  });
-  $('pos').textContent = `0/${chords.chords.length}`;
-}
-
-function paintChords() {
-  [...$('chords').children].forEach((el, i) => {
-    el.classList.toggle('now', i === chordIdx);
-    const dots = el.querySelector('.beat');
-    if (dots) dots.textContent = i === chordIdx ? '●'.repeat(beat) + '○'.repeat(4 - beat) : '○○○○';
-  });
-}
-
-// 和弦谱的试听：把当前和弦的音按节奏拨出来（Web Audio 合成，不依赖音色库）。
-// 跟弹时不发声 —— 否则会被麦克风收进去，反而干扰判定。
-let chordCtx = null;
-function strumChord(midis, at) {
-  if (!chordCtx) chordCtx = (audio.getCtx && audio.getCtx()) || new (window.AudioContext || window.webkitAudioContext)();
-  midis.forEach((m, i) => {
-    const f = 440 * Math.pow(2, (m - 69) / 12);
-    const t = at + i * 0.018;                    // 六根弦依次扫过（18ms）
-    const osc = chordCtx.createOscillator(), g = chordCtx.createGain(), lp = chordCtx.createBiquadFilter();
-    osc.type = 'sawtooth'; osc.frequency.value = f;
-    lp.type = 'lowpass'; lp.frequency.value = Math.min(5000, f * 7);
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(0.16 / Math.max(1, midis.length / 4), t + 0.008);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + 1.1);
-    osc.connect(lp); lp.connect(g); g.connect(chordCtx.destination);
-    osc.start(t); osc.stop(t + 1.2);
-  });
-}
-
-function startChords(withSound = false) {
-  // 护栏：数据没到（或 JSON 出错）时别让按钮"点了没反应/报错"，直接说清楚。
-  if (!chords || !chords.chords || !chords.chords.length) {
-    setVerdict('和弦谱数据没加载成功，刷新页面再试（data/chord_practice.json）');
-    return;
-  }
-  // 起点：点过和弦卡就从那一个开始，没点过就从头
-  chordIdx = (chordPick >= 0 ? chordPick : 0);
-  chordPick = -1;                  // 只认这一次点击，下一遍仍旧从头
-  beat = 0;
-  paintChords();
-  $('pos').textContent = `${chordIdx + 1}/${chords.chords.length}`;
-  setVerdict('和弦练习：每个和弦 4 拍，跟着高亮换和弦。弹错不停，标红继续。');
-  const ms = (60 / userBpm) * 1000;
-  if (withSound) {
-    if (!chordCtx) chordCtx = (audio.getCtx && audio.getCtx()) || new (window.AudioContext || window.webkitAudioContext)();
-    chordCtx.resume && chordCtx.resume();
-    strumChord(chords.chords[chordIdx].midis, chordCtx.currentTime + 0.05);
-  }
-  beatTimer = setInterval(() => {
-    beat++;
-    if (beat >= 4) {
-      beat = 0;
-      chordIdx++;
-      if (chordIdx >= chords.chords.length) {
-        stopChords();
-        setVerdict('🎉 一轮走完', 'ok');
-        return;
-      }
-      $('pos').textContent = `${chordIdx + 1}/${chords.chords.length}`;
-    }
-    if (withSound && chordCtx) strumChord(chords.chords[chordIdx].midis, chordCtx.currentTime + 0.02);
-    paintChords();
-  }, ms);
-}
-
-function stopChords() {
-  clearInterval(beatTimer); beatTimer = 0;
-  $('play').textContent = '▶ 试听'; $('play').classList.remove('on');
-}
+// 2026-09-28：卡片 / 试听 / 四拍轮转整块搬进 ./app/chord-practice.js（行为不变）。
+// 这里只把页面侧的东西注入进去；`beat` 用 get/set 传 —— 它和 alphaTab 光标共用。
+const chordPractice = createChordPractice({
+  $, audio, setVerdict,
+  getBpm: () => userBpm,
+  getBeat: () => beat,
+  setBeat: (v) => { beat = v; },
+});
 
 // ── 顶部按钮 ─────────────────────────────────────────────────────────────────
 $('song').onchange = async () => {
@@ -499,19 +410,19 @@ $('song').onchange = async () => {
   phase = 'idle';
   techDueMs = 0;
   songKind = $('song').value;
-  stopChords();
+  chordPractice.stop();
   if (api && api.playerState === 1) api.playPause();
   // 换曲目 = 换一份判定清单：清掉上一份（含光标对照表）
   notes = null; notesMeta = null; noteIdx = 0; noteBeats = []; noteTicks = [];
   if (songKind === 'chords') {
-    await loadChords();
+    await chordPractice.load();
     $('scoreWrap').style.display = 'none';
     $('chords').style.display = 'block';
     $('track').style.display = 'none';
     $('title').textContent = '和弦练习 — C–Am–F–G';
     $('loop').style.display = 'none';
     userBpm = Number($('speed').value) || 76;
-    renderChords();
+    chordPractice.render();
     setVerdict('和弦练习：点「试听」走一遍和弦（每和弦 4 拍），点「跟弹」开始判定。');
   } else if (songKind === 'arp') {
     // 无谱面测试：不画五线谱，用音格子（T3231323 / C–Am–F–G）
@@ -559,8 +470,8 @@ $('play').onclick = async () => {
   // 试听和跟弹互斥：正在跟弹时点试听，先把跟弹停掉（两个播放状态不能并存）
   if (micTimer) { stopMic(); setVerdict('已停止跟弹 —— 试听和跟弹不能同时进行'); }
   if (songKind === 'chords') {
-    if (beatTimer) { stopChords(); setVerdict('已停止'); }
-    else { await loadChords(); startChords(true); }        // 和弦谱试听：4 拍一个和弦，带声音
+    if (chordPractice.isRunning()) { chordPractice.stop(); setVerdict('已停止'); }
+    else { await chordPractice.load(); chordPractice.start(true); }        // 和弦谱试听：4 拍一个和弦，带声音
     return;
   }
   initAlphaTab();
@@ -582,18 +493,12 @@ $('mode').onchange = () => {
     : '跟节拍：谱面按拍走，漏掉的音会被标成漏');
 };
 
-const __unusedLoop = () => {
-  if (!api) return;
-  api.isLooping = !api.isLooping;
-  $('loop').classList.toggle('on', api.isLooping);
-};
-
 $('speed').onchange = () => {
   userBpm = Number($('speed').value) || 76;
   if (songKind === 'heyjude' && api && score) {
     api.playbackSpeed = userBpm / (score.tempo || 76);
-  } else if (beatTimer) {                 // 和弦练习：换速度要重排拍子
-    stopChords(); startChords();
+  } else if (chordPractice.isRunning()) {                 // 和弦练习：换速度要重排拍子
+    chordPractice.stop(); chordPractice.start();
   }
 };
 // 变调夹：改了就立刻生效（下一次判定就用新值）。夹多少品，期望音就升多少半音。
@@ -1016,6 +921,8 @@ function micTick() {
 }
 
 function micTickBody() {
+  // 取样率：这一段里要读十几处，统一从这里取（原来每处重复同一个表达式）。
+  const srRate = () => (audio.getCtx() && audio.getCtx().sampleRate) || 48000;
   const buf = audio.readFrame();
   if (!buf) { micTimer = requestAnimationFrame(micTick); return; }
   const lv = rms(buf, buf.length - 1024, 1024);
@@ -1046,7 +953,7 @@ function micTickBody() {
   if (phase === 'waiting') {
     try {
       const n = 8192;
-      const srNow = (audio.getCtx() && audio.getCtx().sampleRate) || 48000;
+      const srNow = srRate();
       domHz = dominantF0InBand(spectrumOf(buf.subarray(buf.length - n)), srNow, n, 90, 900).hz || 0;
     } catch (e) { domHz = 0; }
     domHist.push(domHz);
@@ -1270,7 +1177,7 @@ function micTickBody() {
       const sim = spectrumOf(buf.subarray(Math.max(0, buf.length - PEAK_N)));
       // 抬头过滤：只有起音这一下**真的往上跳**的频点才算数（rise>1），
       // 还在衰减的旧谐波（rise<1）压到 0 —— 即"取过峰值后，后续延续谐波不处理"。
-      const ctxRate = (audio.getCtx() && audio.getCtx().sampleRate) || 48000;
+      const ctxRate = srRate();
       const riseBinHz = ctxRate / FLUX_N;      // rise 阵列来自 2048 点窗
       const peakBinHz = ctxRate / PEAK_N;
       for (let i = 0; i < sim.length; i++) {
@@ -1308,7 +1215,7 @@ function micTickBody() {
   if (phase === 'settling' && now - onsetAtMs >= 90) {
     phase = 'waiting';
     const sr2 = audio.getRate();
-    const riseBinHz = ((audio.getCtx() && audio.getCtx().sampleRate) || 48000) / FLUX_N;
+    const riseBinHz = srRate() / FLUX_N;
     const a = track(buf, audio.getDecim(), sr2);
     const novel = novelSpectrum(a.mags);
     // 调音器那条思路：**只有"足够像一根弦在振动"的信号才算演奏**。
@@ -1353,7 +1260,7 @@ function micTickBody() {
       let hnrDom = 0;
       try {
         const n = 1 << Math.floor(Math.log2(Math.min(8192, buf.length)));
-        const srNow = (audio.getCtx() && audio.getCtx().sampleRate) || 48000;
+        const srNow = srRate();
         const sp = spectrumOf(buf.subarray(buf.length - n));
         const domF0 = dominantF0InBand(sp, srNow, n, 90, 900).hz || 0;
         if (domF0 > 0) hnrDom = harmonicity(sp, srNow, n, domF0);
@@ -1368,7 +1275,7 @@ function micTickBody() {
         let peakyNovel = 0;
         try {
           const n = 1 << Math.floor(Math.log2(Math.min(8192, buf.length)));
-          const srNow = (audio.getCtx() && audio.getCtx().sampleRate) || 48000;
+          const srNow = srRate();
           const expMidi = notes && notes[noteIdx] ? notes[noteIdx].midi : 60;
           const expHz = 440 * Math.pow(2, (expMidi - 69) / 12);
           const sp = spectrumOf(buf.subarray(buf.length - n));
@@ -1439,8 +1346,8 @@ function micTickBody() {
       micTimer = requestAnimationFrame(micTick);
       return;
     }
-    if (songKind === 'chords' && chords) {
-      const c = chords.chords[chordIdx];
+    if (songKind === 'chords' && chordPractice.data) {
+      const c = chordPractice.data.chords[chordPractice.idx];
       if (c) {
         const r = chordOutsiders(novel, sr2, a.fftN, c.midis);
         const pass = r.ratio >= 0.7;
@@ -1501,7 +1408,7 @@ function micTickBody() {
         // 所以候选取"附近还没判、时间上说得通"的几个音，逐个量一次"自己贴不贴"，
         // 挑最像的那个；同一音高重复出现时时间近的优先（损失里带了 |时间差|/2）。
         const N = 8192;
-        const srNow = (audio.getCtx() && audio.getCtx().sampleRate) || 48000;
+        const srNow = srRate();
         let specE = null;
         try { specE = spectrumOf(buf.subarray(Math.max(0, buf.length - N))); } catch (e) { specE = null; }
         // 先按时间取"窗内最近的那个音"（这是老行为，快音段落最稳）；
@@ -1558,7 +1465,7 @@ function micTickBody() {
       // 判定：知道答案的打法 —— 量出实际音高，再归到最近的半音上比。
       // 不用 YIN 的绝对读数：真机录音上它会锁到次谐波（实测 82~100Hz，差一个半八度，
       // 而 clarity 还有 0.9），这也是项目当初放弃用 YIN 判定的原因。
-      const peakRate = (audio.getCtx() && audio.getCtx().sampleRate) || 48000;
+      const peakRate = srRate();
       // ── 量音高用哪个窗 ───────────────────────────────────────────────
       // 用**判定这一刻往回 170ms**（判定发生在起音后约 90ms，所以这个窗大部分是新音）。
       // 原来用的是"起音那一刻往回 170ms"的快照 —— 那个窗**结束在起音那一瞬**，
@@ -1595,7 +1502,7 @@ function micTickBody() {
       let onDiffSpec = null;   // 起音前后相减后的谱（只留抬头的那部分）
       let srDOut = 48000;
       try {
-        const srD = (audio.getCtx() && audio.getCtx().sampleRate) || 48000;
+        const srD = srRate();
         srDOut = srD;
         const backD = Math.round(((now - onsetAtMs) / 1000) * srD);
         const WD = Math.round(0.040 * srD);
@@ -1624,7 +1531,7 @@ function micTickBody() {
       //   buf 本身有 341ms，够反推 —— 不需要额外的环形缓存。
       let attackDiffSpec = null;
       try {
-        const srA = (audio.getCtx() && audio.getCtx().sampleRate) || 48000;
+        const srA = srRate();
         const backA = Math.round(((now - onsetAtMs) / 1000) * srA);   // 起音点距"现在"多少采样
         const WA = Math.round(0.030 * srA);                            // 30ms 窗
         const gapA = Math.round(0.010 * srA);                          // 两侧空档
@@ -1657,7 +1564,7 @@ function micTickBody() {
       let readConf = false, readVeto = false;
       if (JUDGE_READ) {
         try {
-          const srR = (audio.getCtx() && audio.getCtx().sampleRate) || 48000;
+          const srR = srRate();
           const backR = Math.round(((now - onsetAtMs) / 1000) * srR);   // 起音点在"现在"之前多少采样
           // 相对起音的时刻（秒）→ buf 里的下标（buf 末尾就是"现在"）
           const at = (sec) => buf.length - backR + Math.round(sec * srR);
@@ -1732,7 +1639,7 @@ function micTickBody() {
             const extra = {};
             if (globalThis.__judgeRise && rise) {
               extra.rise = rise;
-              extra.riseBinHz = ((audio.getCtx() && audio.getCtx().sampleRate) || 48000) / FLUX_N;
+              extra.riseBinHz = srRate() / FLUX_N;
             }
             if (globalThis.__judgePrev && best > 0 && notes[best - 1]) {
               extra.prevMidi = notes[best - 1].midi + pitchShift();
@@ -2013,7 +1920,7 @@ function micTickBody() {
       // 1 弦（细、轻、基频弱）单独放宽；技巧格不走这条（它按 BPM 等第二个音）。
       let stepRatio = null;
       try {
-        const srNow = (audio.getCtx() && audio.getCtx().sampleRate) || 48000;
+        const srNow = srRate();
         const back = Math.round(((now - onsetAtMs) / 1000) * srNow);   // 起音点在这之前多久
         const N5 = Math.max(96, Math.round(0.005 * srNow));            // 5ms
         if (back > N5 * 2 && back + 8 < buf.length) {
@@ -2046,7 +1953,7 @@ function micTickBody() {
       let detCents = null;
       let detHz = null;
       try {
-        const srNow4 = (audio.getCtx() && audio.getCtx().sampleRate) || 48000;
+        const srNow4 = srRate();
         const back4 = Math.round(((now - onsetAtMs) / 1000) * srNow4);
         // ⚠ 窗长**不能**用期望音的频率去定（那就等于把"期望音那把尺子"带回来了，
         //   用户当场指出）。这里用**固定 40ms**：最粗的 6 弦空弦 E2(82Hz) 也有 3.3 个周期，
@@ -2212,14 +2119,26 @@ function micTickBody() {
         let ratio = 0;
         try { ratio = chordOutsiders(novel, sr2, a.fftN, groupMidis).ratio; } catch (e) { ratio = 0; }
         let weakest = null, weakestHnr = Infinity;
+        const hnrList = [];                     // 诊断用：这一格每个音各自的存在性
         for (let k = best; k < slotLast; k++) {
           const hz = 440 * Math.pow(2, (notes[k].midi + pitchShift() - 69) / 12);
           let h = 0;
           try { h = harmonicity(spec, peakRate, PEAK_N, hz); } catch (e) { h = 0; }
+          hnrList.push(h);
           if (h < weakestHnr) { weakestHnr = h; weakest = notes[k]; }
         }
         const ratioOk = ratio >= 0.7;              // 和"和弦练习"同一个门限
         const presentOk = weakestHnr >= 2.0;       // 每个音自己那串谐波要立着
+        // 诊断（默认关，VC_MULTI_DIAG=1 才打）：多音格为什么判过/判不过的证据。
+        // 只多打一行日志，不参与任何判定 —— 判定行为与不加这一行完全相同。
+        if (globalThis.__vcMultiDiag) {
+          console.log('[多音] #' + (best + 1) + ' 要 '
+            + notes.slice(best, slotLast).map((n) => midiToNameOf(n.midi)).join('+')
+            + ' ｜ 解释率 ' + ratio.toFixed(2) + (ratioOk ? ' ✓' : ' ✗')
+            + ' ｜ 各音存在性 '
+            + notes.slice(best, slotLast).map((n, i) => midiToNameOf(n.midi) + '=' + hnrList[i].toFixed(2)).join(' ')
+            + (presentOk ? ' ✓' : ' ✗ 最弱 ' + midiToNameOf(weakest.midi)));
+        }
         if (!presentOk) slotBad = weakest;
         else if (!ratioOk) {
           slotBad = { midi: exp.midi, string: exp.string, fret: exp.fret, extra: true };
@@ -2450,7 +2369,7 @@ function micTickBody() {
     $('good').textContent = good;
     $('bad').textContent = bad;
     $('pos').textContent = songKind === 'chords'
-      ? `${Math.min(chordIdx + 1, (chords.chords.length))}/${chords.chords.length}`
+      ? `${Math.min(chordPractice.idx + 1, (chordPractice.data.chords.length))}/${chordPractice.data.chords.length}`
       : `${Math.min(noteIdx, notes.length)}/${notes.length}`;
     // 光标跟着谱面时间走（不是跟着你弹了几声走）
     // 光标（用高亮当光标）：只在判完一个音之后才挪 —— 你不弹它就不动。
@@ -2459,8 +2378,8 @@ function micTickBody() {
     if (songKind === 'heyjude' && notes && noteIdx < notes.length) {
       const nx = notes[noteIdx];
       $('next').innerHTML = `下一个：<b>${midiToNameOf(nx.midi)}</b>（${nx.string}弦 ${nx.fret}品）`;
-    } else if (songKind === 'chords' && chords && chords.chords[chordIdx]) {
-      $('next').innerHTML = `当前和弦：<b>${chords.chords[chordIdx].name}</b>`;
+    } else if (songKind === 'chords' && chordPractice.data && chordPractice.data.chords[chordPractice.idx]) {
+      $('next').innerHTML = `当前和弦：<b>${chordPractice.data.chords[chordPractice.idx].name}</b>`;
     }
   }
   micTimer = requestAnimationFrame(micTick);
@@ -2623,7 +2542,7 @@ async function startMic() {
   resetDiag();
   // 音符加载后重建"光标→谱面"对应表（按**当前选中的声部**）
   if (score) buildTickMap(score, Number($('track') && $('track').value) || 0);
-  else await loadChords();
+  else await chordPractice.load();
   // 一开始就把光标画在"第一个该弹的音"上（以前要等判完第一个音才出现，
   // 用户看到的就是"光标没从第一个音开始"）。
   highlightCurrent();
@@ -2713,7 +2632,7 @@ initAlphaTab();
 if ($('title') && !$('title').textContent) $('title').textContent = 'v' + BUILD + ' 正在加载谱面…';
 // 版本号也写进「导出记录」旁边那一格（用户要看的就是这里）
 if ($('ver')) $('ver').textContent = 'v' + BUILD;
-window.__page = () => ({ songKind, userBpm, chordIdx, beat, hasApi: !!api });
+window.__page = () => ({ songKind, userBpm, chordIdx: chordPractice.idx, beat, hasApi: !!api });
 // 给离线分析用的钩子：拿到这一遍的逐音记录（导出按钮存的就是它）
 window.__vcSessionLog = () => sessionLog;
 window.__vcOnsetLog = () => onsetLog;
