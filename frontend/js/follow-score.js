@@ -530,6 +530,11 @@ let onsetAtMs = 0;
 //   只有"模糊音"会被推迟到 onsetAtMs + 250（这时判定窗自动变成稳定段）。
 let judgeAtMs = 0;
 let lastOnsetMs = -1e9;   // 忘了声明这个变量 → 模块加载时直接抛错 → 所有按钮都没挂上事件
+// ⚠ 2026-09-28：`lastOnsetMs` 一直被当成"最后一次起音的时刻"用（起音间隔、冷却都靠它），
+//   可 1162 行又把它和 onsetAtMs 一起赋成 now → 逐音时间账里 `onsetAtMs - lastOnsetMs` 恒等于 0
+//   → devMs 永远 null → 抢拍/拖拍一次都没算出来（真机 55 个音实测 0 个有值）。
+//   所以单独留一个"上一拨"：它才是时间账要的间隔起点。
+let prevOnsetMs = 0;      // 上一次起音的时刻（算"这一下和上一拨的间隔"用）
 let rise = null;
 let levelHist = [];
 let floor = 0.001, gate = 0.01, frames = 0;
@@ -1159,6 +1164,7 @@ function micTickBody() {
       for (let i = 0; i < nowSpec.length; i++) rise[i] = nowSpec[i] / (prevSpec[i] + 1e-9);
     } else rise = null;
     phase = 'settling';
+    prevOnsetMs = onsetAtMs;   // 先存"上一拨"——时间账要的是这个间隔
     onsetAtMs = now;
     lastOnsetMs = now;
     heardInWindow = true;
@@ -1379,11 +1385,11 @@ function micTickBody() {
  //   那部分不是演奏快慢；间隔差值只反映**这一段他自己的节奏相对谱面快了多少**，
  //   所以"全弹快"会从第二三个音开始就一路记抢拍。
  //   （老的那段"时钟对号"仍然留着 but 停用：if (false) —— 那是按网格等，弹在前面会被吞。）
- if (modeKind === 'tempo' && best > 0 && lastOnsetMs > 0 && onsetAtMs > 0) {
-   const scoreGap = (expectedAtMs(best) - expectedAtMs(best - 1));
-   const myGap = onsetAtMs - lastOnsetMs;
-   if (Number.isFinite(scoreGap) && scoreGap > 0 && myGap > 0) devMs = myGap - scoreGap;
- }
+  if (modeKind === 'tempo' && best > 0 && prevOnsetMs > 0 && onsetAtMs > 0) {
+    const scoreGap = (expectedAtMs(best) - expectedAtMs(best - 1));
+    const myGap = onsetAtMs - prevOnsetMs;      // 这一下与**上一拨**的间隔（原来误用 lastOnsetMs，恒为 0）
+    if (Number.isFinite(scoreGap) && scoreGap > 0 && myGap > 0) devMs = myGap - scoreGap;
+  }
       if (false) {   // 2026-09-23：跟节拍改音驱动，老"时钟对号"这条路停用（保留对照）
         // ⚠ 这条路已经不通了（2026-09-23：跟节拍改成音驱动，见下面 micTickBody 的说明）。
         // 保留代码是为了对照老口径，条件永远是 false。
@@ -2498,7 +2504,7 @@ async function startMic() {
     setVerdict('开不了麦克风：' + (e.message || e.name) + '（手机必须 https）'); return;
   }
   resetAnalysis();
-  frames = 0; floor = 0.001; levelHist = []; lastOnsetMs = -1e9;
+  frames = 0; floor = 0.001; levelHist = []; lastOnsetMs = -1e9; prevOnsetMs = 0;
   techDueMs = 0;                  // 上一轮残留的技巧时刻不能带进这一遍
   good = 0; bad = 0; rise = null;
   // 变调夹 / BPM 在开弹这一刻读一次（设置面板里改了立刻生效）
