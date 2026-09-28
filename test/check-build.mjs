@@ -23,7 +23,9 @@ const scan = (file, re) => {
 };
 
 scan('frontend/index.html', /follow-score\.js\?v=([^"']+)/g);
-scan('frontend/test/practice.html', /main\.js\?v=([^"']+)/g);
+// ⚠ 2026-09-28：老页面（main.js + judge/ui/state/exercises/follow/metronome 那几个）
+//   已经被产品页取代、整簇删掉了，`frontend/test/practice.html` 也跟着删了 ——
+//   这里原来会去读它，删完就 ENOENT。老页面不再有版本号要检查。
 for (const f of fs.readdirSync(path.join(house, 'frontend/js'))) {
   if (f.endsWith('.js')) scan(`frontend/js/${f}`, /engine\/[a-z]+\.js\?v=([^'"]+)/g);
 }
