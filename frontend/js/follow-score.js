@@ -11,11 +11,11 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0928-1553';
+const BUILD = '0928-1605';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
-import { rms, spectrumOf } from './engine/dsp.js?v=0928-1553';
+import { rms, spectrumOf } from './engine/dsp.js?v=0928-1605';
 import * as audio from './audio.js';
 import {
   track, fluxRelOf, resetAnalysis, novelSpectrum, verifyExpectedNote, chordOutsiders,
@@ -24,12 +24,12 @@ import {
   lowBandRiseOf,
   shapeFluxOf, harmonicity, spectralSparsity, spectralFlatness, spectralPeakiness, f0SeriesFromDiff,
   dominantF0InBand, strongestF0InBand, diffMags, matchNoteByCandidates, readPluckF0,
-} from './engine/analysis.js?v=0928-1553';
-import { CFG, FLUX_N } from './engine/config.js?v=0928-1553';
+} from './engine/analysis.js?v=0928-1605';
+import { CFG, FLUX_N } from './engine/config.js?v=0928-1605';
 import { createMetro } from './metro-core.js';
 // 分层：检测能力（起音层 / 判定层）各自一个文件，阈值也都收在那两个文件里。
-import { decideOnset, ONSET } from './engine/onset.js?v=0928-1553';
-import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js?v=0928-1553';
+import { decideOnset, ONSET } from './engine/onset.js?v=0928-1605';
+import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js?v=0928-1605';
 // 光标层：谱面格子 ↔ 判定清单 的对号（纯函数，单独一个文件）
 import { collectScoreSlots, mapSequenceToSlots } from './app/cursor.js';
 // 跟节拍层（状态机 + 拍点 + 提示音）—— 这一层只通过回调跟页面打交道
@@ -40,9 +40,9 @@ import { diag, resetDiag, initDiag } from './app/diag.js';
 import { createChordPractice } from './app/chord-practice.js';
 import { createSessionLog } from './app/session-log.js';
 import { createSessionState } from './app/session-state.js';
+import { createScoreView } from './app/score-view.js';
 
-let api = null;            // alphaTab 实例（只建一次）
-let score = null;
+// api / score（alphaTab 实例和解析出来的谱面）已搬进 ./app/score-view.js —— 见下面的 scoreView。
 let songKind = 'heyjude';
 // 和弦练习自己那 5 个状态（数据 / 当前和弦 / 起点 / 定时器 / 试听上下文）
 // 已经搬进 ./app/chord-practice.js。`beat` 留在本文件 —— 它是和弦卡上的点
@@ -83,316 +83,40 @@ const SCORES = {
 };
 const scoreOf = (kind) => SCORES[kind] || null;
 
-// ── alphaTab 部分 ────────────────────────────────────────────────────────────
-function initAlphaTab() {
-  if (api || !window.alphaTab) return api;
-  api = new alphaTab.AlphaTabApi($('score'), {
-    file: (scoreOf(songKind) && scoreOf(songKind).gp) || './data/hey_jude.gp3',
-    core: { fontDirectory: './vendor/font/' },   // 字体在本地（jsdelivr 被挡）
-    display: {
-      // 谱面一律用整页折行（page）：一行摆若干小节，摆不下换下一行，纵向滚动 ——
-      // 跟纸上谱子、跟 Songsterr / Soundslice 那种产品一样的排法。
-      // 之前窄屏用 horizontal（无限一条长线）是错的：那是横向走带，不是谱面。
-      layoutMode: 'page',
-      // 手机上谱子按屏宽缩小（不是拉成一行），保证"一行里能放下几个小节"
-      scale: isPhone() ? 0.7 : 1,
-    },
-    player: {
-      enablePlayer: true,
-      enableCursor: true,
-      enableAnimatedBeatCursor: true,
-      enableElementHighlighting: true,
-      scrollElement: $('scoreWrap'),
-      soundFont: './vendor/sonivox.sf2',
-    },
-  });
-  api.error.on((e) => err('alphaTab: ' + ((e && (e.message || e)) || e)));
-  // 自检：把渲染/加载的状态打到页面上（不靠猜，F12 都不用开）。
-  // 谱面空白时这几行就能直接指出是哪一环断的。
-  const diag = [];
-  const showDiag = () => { err(diag.join(' ｜ ')); };
-  diag.push(`alphaTab ${window.alphaTab && (window.alphaTab.version || '?')}`);
-  if (api.soundFontLoaded) api.soundFontLoaded.on(() => { diag.push('音色库 ok'); showDiag(); });
-  if (api.renderFinished) api.renderFinished.on(() => { diag.push('渲染 ok'); showDiag(); });
-  api.scoreLoaded.on((s) => {
-    score = s;
-    diag.push(`谱面 ok（${s.title}，${s.tracks.length} 个声部）`);
-    showDiag();
-    $('title').textContent = `${s.title} — ${s.artist}（v${BUILD}）`;
-    userBpm = Math.round(s.tempo) || 76;
-    $('speed').value = userBpm;
-    fillTracks(s);
-    buildTickMap(s);
-  });
-  // ⚠ 光标必须等**渲染完成**之后再摆一次（2026-09-23，用户报"切到茉莉花再切回来，两边都没光标"）：
-  //   buildTickMap 在 scoreLoaded 里跑，那时 alphaTab 往往还没排完版，
-  //   highlightCurrent() 去 renderer.boundsLookup 取坐标会取不到 → 光标画不出来；
-  //   而切过一次曲子之后这个时机更差（旧实例销毁、新实例刚建），于是两边都没光标。
-  //   这里在每帧渲染结束时补摆一次：映射重算 + 光标重画，位置取不到就下次渲染再试。
-  if (api.renderFinished) {
-    api.renderFinished.on(() => {
-      if (!score) return;
-      try { buildTickMap(score, Number($('track') && $('track').value) || 0); } catch (e) {}
-      try { highlightCurrent(); } catch (e) {}
-    });
-  }
-  // 按钮文字跟着播放器的真实状态走（这是"要点两次"的根因：点完立刻读状态还没更新）
-  api.playerStateChanged.on((e) => {
-    const playing = e && e.state === 1;
-    $('play').textContent = playing ? '■ 停止' : '▶ 试听';
-    $('play').classList.toggle('on', playing);
-  });
-  api.playerPositionChanged.on(() => { if (songKind === 'heyjude') costNothing(); });
-  // 点谱面定位：点哪个音就从哪个音开始练（练琴时最常见的需求：只想练那两句）
-  if (api.beatMouseDown) {
-    api.beatMouseDown.on((ev) => {
-      const beat = ev && (ev.beat || ev);
-      const idx = noteBeats.indexOf(beat);
-      if (idx >= 0) {
-        // ⚠ 跟弹进行中不要改起点：手指划到谱面碰一下就把序号挪走，
-        // 这一遍剩下的音会跟着错位（"点跟弹还是从第二个音开始"有一半是这么来的）。
-        // 要换位置就先停止。
-        if (micTimer) {
-          setVerdict('正在跟弹 —— 先点「停止」，再点谱面换练习位置', '');
-          return;
-        }
-        session.noteIdx = idx;
-        session.holdUntilMs = 0;
-        session.pickedStart = true;      // 明确点过谱面 → 这一遍从这儿开始
-        // 从新的地方开始练：**旧的谱面标记要清掉**。
-        // （不然新一段和上一段的绿/红混在一起，看不出这次练到哪。）
-        if ($('marks')) $('marks').innerHTML = '';
-        session.resetWrongList();
-        session.resetMissCounts();
-        $('wrongs').textContent = '';
-        $('good').textContent = '0'; $('bad').textContent = '0';
-        if ($('unclear')) $('unclear').textContent = '0';
-        if ($('missed')) $('missed').textContent = '0';
-        setVerdict(`从第 ${idx + 1} 个音开始（${midiToNameOf((notes && notes[idx] && notes[idx].midi) || 0)}）`);
-        highlightCurrent();
-      }
-    });
-  }
-  // 播放器就绪后再压一次静音 —— 这是"只听旋律"真正生效的时机。
-  // 之前只在 scoreLoaded 里设 playbackInfo.isMute，播放器准备时会被覆盖，
-  // 所以选了旋律轨仍然听得见钢琴伴奏。
-  if (api.playerReady) api.playerReady.on(() => { if (score) applyTrack(Number($('track').value) || 0); });
-  // 3 秒后还没渲染出东西，直接把结论说出来
-  setTimeout(() => {
-    const el = $('score');
-    if (!el.children.length) err('谱面没有渲染出来：' + (diag.join(' ｜ ') || '（没有任何状态回调触发，说明 .gp 没加载成功）')
-      + ' ｜ 检查 /data/hey_jude.gp3 和 /vendor/font/Bravura.woff2 能不能打开');
-  }, 3000);
-  // 布局稳定后补渲染一次：首帧容器可能还是 0 宽/0 高，alphaTab 按那个尺寸排完就什么都看不见。
-  setTimeout(() => { try { api.render(); } catch (e) { err('补渲染失败：' + (e.message || e)); } }, 600);
-  return api;
-}
+// 会话记录：每个音的"期望 / 实测"，包含判定比值、周期性(clarity)、电平、时刻。
+// 这是**唯一能用来调参的数据**：录一遍干净的（只弹对的）就等于拿到标准答案，
+// 不用再靠"你猜我有没有弹对"。
+const slog = createSessionLog();
+const session = createSessionState();   // 会话状态：见 app/session-state.js
+// ⚠ 上面这两行必须在 scoreView 之前：谱面视图要拿 session 记"用户点了哪一格当起点"。
 
-function costNothing() {}
-
-// 谱面音符 → tick 对照表：alphaTab 里"程序化移动光标"的正规入口是 tickPosition
-// （timePosition 需要播放器在跑）。设到"下一个该弹的音"，光标就动；
-// 我们只在判完一个音之后才改它 —— 你不弹，它就一直停着。
-let noteTicks = [];
-let noteBeats = [];       // 每个音符对应的 alphaTab Beat 对象（用来高亮当"光标"）
-
-// 把"判定用的时间轴"按谱面的拍点重排（两边索引一致，光标才查得到布局）。
-//
-// ⚠ 这段原来没有任何校验，是个大坑：它给**每个拍**找时间轴上最近的音，
-// 一旦两边的时刻对不上（速度不一致 / absoluteStart 拿不到 / 时间轴是另一份谱），
-// 所有拍就会**一起指到最近的那一个音** —— 于是"期望音"变成全曲同一个音。
-// 手机实测就是这个：38 个音的期望全是 C4(2弦1品)，用户只弹了两个音却"全对"。
-// 所以现在先算对齐质量，**对不上就不重排**（保持时间轴原样），并把结论写到自检栏。
-let alignInfo = null;
-
-// 光标层的两个映射函数已挪到 ./app/cursor.js（collectScoreSlots / mapSequenceToSlots），
-// 这里通过 import 使用 —— 见文件顶部。
-
-function buildTickMap(s, trackIndex = 0) {
-  noteTicks = [];
-  noteBeats = [];
-  alignInfo = null;
-  // 光标用的拍点表：**过滤掉延音接续**。
-  // （试过把延音那一拍也放进来，想让数量和时间轴一致 —— 结果更糟：延音那一拍在谱面上
-  //   往往没有独立的音符头，boundsLookup 查不到它 → 光标指不到地方、或者干脆不动。
-  //   用户当场反馈"根本不指向正确的，有时候压根不动"。退回来。）
-  const beats = collectScoreSlots(s, trackIndex);
-  if (!beats.length) return;
-  noteTicks = beats.map((b) => b.start);
-  // 判定清单 = 时间轴那一份（`notes`，118 个音）；光标 = 谱面的拍点表（`beats`）。
-  // 两边合成一份"第 i 个音用哪一个拍点当光标"的对照表 —— 见 mapSequenceToSlots。
-  // ⚠ 这一层只做这一件事：**把光标指到判定清单里正在等的那个音上**。
-  const mapped = mapSequenceToSlots(notes, beats);
-  noteBeats = mapped.beats;
-  alignInfo = mapped.info;
-  showAlignLine();
-}
-
-// 对齐结论写在「导出记录」旁边（跟版本号挨着）：手机上出问题时，这两个数
-// 一眼就能说明"是不是两份清单不一样"。用户不用开控制台。
-function showAlignLine() {
-  const box = $('align');
-  if (!box) return;
-  const a = alignInfo || {};
-  if (!a.notesFromTimeline) { box.textContent = `谱面 ${a.beatsFromScore || 0} 格`; return; }
-  const okLine = a.source === 'index';
-  box.textContent = okLine
-    ? `对齐 ✓ 谱面${a.beatsFromScore}=判定${a.notesFromTimeline}`
-    : `对齐 ⚠ 谱面${a.beatsFromScore} vs 判定${a.notesFromTimeline}（${a.source}`
-      + `${a.mismatched ? `，${a.mismatched} 处对不上` : ''}`
-      + `${a.matchedFail ? `，${a.matchedFail} 处凑不上` : ''}）`;
-  box.style.color = okLine ? '#6fbf73' : 'var(--bad)';
-}
-
-// 把"当前该弹的那一格"高亮出来当光标。
-// alphaTab 自带的播放光标需要播放器在跑（跟弹时我们故意不跑），
-// 所以改用它的高亮 API —— 不依赖播放，最稳。
-// 在谱面上标出这个音判成什么：绿 = 对、红 = 错、灰 = 测不准。
-// 用和光标同一套布局坐标，所以标记会一直贴在对应的音上（滚动也跟着走）。
-function markNote(idx, kind) {
-  // 无谱面测试（arp）：直接在音格子上标对/错
-  const cell = document.getElementById('cell' + idx);
-  if (cell && cell.classList) cell.classList.add(kind === 'ok' ? 'ok' : 'bad');
-  if (!api || !api.renderer) return;
-  const beat = noteBeats[idx];
-  const box = $('marks');
-  if (!beat || !box) return;
-  try {
-    const lookup = api.renderer.boundsLookup;
-    const bb = lookup && lookup.findBeat ? lookup.findBeat(beat) : null;
-    const b = bb && (bb.visualBounds || bb.realBounds || bb);
-    if (!b || b.w == null) return;
-    const el = document.createElement('div');
-    el.className = 'mk ' + kind;
-    // 同理：#marks 也挂到 #scoreWrap 上了，要把 #score 的偏移补上（见 highlightCurrent）
-    let mkOffX = 0, mkOffY = 0;
-    try {
-      const sEl = document.getElementById('score'), wEl = document.getElementById('scoreWrap');
-      if (sEl && wEl && sEl.getBoundingClientRect && wEl.getBoundingClientRect) {
-        const sr = sEl.getBoundingClientRect(), wr = wEl.getBoundingClientRect();
-        mkOffX = sr.left - wr.left + wEl.scrollLeft;
-        mkOffY = sr.top - wr.top + wEl.scrollTop;
-      }
-    } catch (e) { mkOffX = 0; mkOffY = 0; }
-    el.style.left = `${Math.round(b.x + mkOffX)}px`;
-    el.style.top = `${Math.round(b.y + b.h - 2 + mkOffY)}px`;
-    el.style.width = `${Math.max(6, Math.round(b.w))}px`;
-    box.appendChild(el);
-  } catch (e) { /* 定位失败就不标，不影响判定 */ }
-}
-
-// index 省略 = 当前该弹的那个音（session.noteIdx）；给"起音预览"用时会显式传下一个音
-function highlightCurrent(index = session.noteIdx) {
-  if (!api) { highlightCell(Math.max(0, Math.min(index, (notes || []).length - 1))); return; }
-  const box = document.getElementById('cursor');
-  const idx = Math.max(0, Math.min(index, (noteBeats || []).length - 1));
-  const beat = noteBeats[idx];
-  // 光标/标记现在挂在 #scoreWrap 上（不放在 #score 里，免得被 alphaTab 渲染时删掉），
-  // 而 alphaTab 给的坐标是**相对它自己的容器**的，所以要把两者的偏移补上。
-  const scoreEl = document.getElementById('score');
-  const wrapEl = document.getElementById('scoreWrap');
-  let offX = 0, offY = 0;
-  try {
-    if (scoreEl && wrapEl && scoreEl.getBoundingClientRect && wrapEl.getBoundingClientRect) {
-      const sr = scoreEl.getBoundingClientRect(), wr = wrapEl.getBoundingClientRect();
-      offX = sr.left - wr.left + wrapEl.scrollLeft;
-      offY = sr.top - wr.top + wrapEl.scrollTop;
-    }
-  } catch (e) { offX = 0; offY = 0; }
-  // 这个版本的 alphaTab 没有 highlight API（包里的 highlightBeats 出现 0 次），
-  // 但提供了布局坐标（boundsLookup）。所以自己算位置、自己画。
-  try {
-    const lookup = api.renderer && api.renderer.boundsLookup;
-    let b = null;
-    if (lookup && beat) {
-      const bb = (lookup.findBeat && lookup.findBeat(beat)) || (lookup.getBeatBounds && lookup.getBeatBounds(beat));
-      b = bb && (bb.visualBounds || bb.realBounds || bb);
-    }
-    if (box && b && b.w != null) {
-      // （下面正常画光标）
-      // 光标要盖住**整行**（五线谱 + 六线谱），不能只盖五线谱那一行：
-      // 找到这一行所属的 staff system，用它的上下边界当光标高度。
-      let y = b.y, h = b.h;
-      const systems = lookup && (lookup.staffSystems || lookup.staffSystemBounds);
-      if (systems && systems.length) {
-        for (const sys of systems) {
-          const sb = sys.visualBounds || sys.realBounds || sys.bounds;
-          if (!sb || !(b.y >= sb.y - 6 && b.y <= sb.y + sb.h + 6)) continue;
-          // 只要**六线谱那一行**（你说得对：光标是给弹的人看的，应该落在六线谱上）。
-          // 一行里 staves 的顺序通常是 [五线谱, 六线谱]，取最后一个；取不到就退回整行。
-          const staves = sys.staffBounds || sys.staves;
-          const tab = staves && staves.length ? staves[staves.length - 1] : null;
-          const tb = tab && (tab.visualBounds || tab.realBounds || tab.bounds);
-          if (tb && tb.h) { y = tb.y; h = tb.h; } else { y = sb.y; h = sb.h; }
-          break;
-        }
-      }
-      box.style.display = 'block';
-      box.style.left = `${Math.round(b.x + offX)}px`;
-      box.style.top = `${Math.round(y + offY)}px`;
-      box.style.width = `${Math.round(b.w)}px`;
-      box.style.height = `${Math.round(h)}px`;
-      // 自动翻谱：光标跑出可视区就把谱面滚过去 —— 一路弹到最后，谱子自己往下走。
-      const wrap = $('scoreWrap');
-      if (wrap && wrap.clientHeight) {
-        const viewTop = wrap.scrollTop;
-        const viewBottom = viewTop + wrap.clientHeight;
-        // 当前这一行要显示在**第一行**：直接滚到顶部，而不是"刚好露出来"。
-        // 只在换"行"时滚：快曲子里每小节好几个音，每个音都滚一次会显得光标跟不上。
-        if (Math.abs(y - (highlightCurrent.lastY || 0)) > 40) {
-          wrap.scrollTop = Math.max(0, y - 8);
-          highlightCurrent.lastY = y;
-        }
-      }
-      return;
-    }
-    if (box) box.style.display = 'none';
-    // ⚠ 光标画不出来时把原因写到页面上（2026-09-23 用户报"一个光标都显示不出来"）：
-    //   光标只有在**能取到这一拍的布局坐标**时才显示；取不到就什么都不显示，用户完全看不到线索。
-    //   这里把三个数写出来：有没有 #cursor 元素、映射表有几条、这一拍取到坐标没有。
-    {
-      const box2 = document.getElementById('cursor');
-      const msg = `光标：元素${box2 ? '有' : '无'}／映射 ${(noteBeats || []).length} 条／`
-        + `这一拍${b ? '有坐标' : (beat ? '取不到坐标' : '没对应上拍点')}`
-        + `（第 ${idx + 1} 个音）`;
-      if ($('align')) $('align').textContent = msg;
-      else err(msg);
-    }
-  } catch (e) {
-    err('光标定位失败：' + (e.message || e) + '（不影响判定）');
-  }
-  try { if (noteTicks[idx] != null) api.tickPosition = noteTicks[idx]; } catch (e) { /* ignore */ }
-}
-
-// 声部选择：默认只留第一个（旋律），其余静音 —— 不然会听到伴奏的和弦声
-function fillTracks(s) {
-  const sel = $('track');
-  sel.innerHTML = '';
-  s.tracks.forEach((t, i) => {
-    const o = document.createElement('option');
-    o.value = String(i);
-    o.textContent = `${t.name || '声部' + (i + 1)}${i === 0 ? '（旋律）' : '（伴奏）'}`;
-    sel.appendChild(o);
-  });
-  sel.value = '0';
-  applyTrack(0);
-  sel.onchange = () => applyTrack(Number(sel.value));
-}
-
-function applyTrack(index) {
-  if (!api || !score) return;
-  const want = score.tracks[index] || score.tracks[0];
-  // 切声部也要重建"光标→谱面"对照表，否则光标还指着上一轨的音
-  buildTickMap(score, index);
-  const others = score.tracks.filter((t, i) => i !== index);
-  // 用官方 API（changeTrackMute）才靠得住；playbackInfo.isMute 也设一遍，双保险。
-  try { api.changeTrackMute(others, true); } catch (e) { /* 老版本没有 */ }
-  try { api.changeTrackMute([want], false); } catch (e) { /* 同上 */ }
-  score.tracks.forEach((t, i) => { if (t.playbackInfo) t.playbackInfo.isMute = i !== index; });
-  try { api.changeTrackVolume([want], 1); } catch (e) { /* 老版本没这个 API */ }
-  // 注意：这里**不要**调 api.render()。静音不影响排版，而加载过程中手动 render
-  // 会打断 alphaTab 自己的渲染流程 —— 表现就是谱面空白（我上一版就踩了这个）。
-}
+// ── 谱面视图（alphaTab 渲染 + 光标）──────────────────────────────────────
+// 2026-09-28：整块搬进 ./app/score-view.js（约 300 行，行为不变）。
+// 这里只把页面侧的东西注入进去；api / score / 光标拍点表 / 对齐结论都归模块自己管。
+const scoreView = createScoreView({
+  $, err, setVerdict, BUILD, isPhone, session,
+  midiToNameOf: (m) => midiToNameOf(m),      // 它在文件后面才声明，所以包一层、用到时再取
+  getSongKind: () => songKind,
+  getScoreUrl: () => (scoreOf(songKind) && scoreOf(songKind).gp) || './data/hey_jude.gp3',
+  getNotes: () => notes,
+  isMicRunning: () => !!micTimer,
+  setUserBpm: (v) => { userBpm = v; },
+  highlightCell: (idx) => highlightCell(idx),
+  // 点谱面定位之后，页面要做的那些事（模块只管"点了第几个音"）
+  onBeatPicked: (idx) => {
+    // 从新的地方开始练：**旧的谱面标记要清掉**。
+    // （不然新一段和上一段的绿/红混在一起，看不出这次练到哪。）
+    if ($('marks')) $('marks').innerHTML = '';
+    session.resetWrongList();
+    session.resetMissCounts();
+    $('wrongs').textContent = '';
+    $('good').textContent = '0'; $('bad').textContent = '0';
+    if ($('unclear')) $('unclear').textContent = '0';
+    if ($('missed')) $('missed').textContent = '0';
+    setVerdict(`从第 ${idx + 1} 个音开始（${midiToNameOf((notes && notes[idx] && notes[idx].midi) || 0)}）`);
+    scoreView.highlightCurrent();
+  },
+});
 
 // ── 和弦练习部分 ─────────────────────────────────────────────────────────────
 // 2026-09-28：卡片 / 试听 / 四拍轮转整块搬进 ./app/chord-practice.js（行为不变）。
@@ -413,9 +137,9 @@ $('song').onchange = async () => {
   techDueMs = 0;
   songKind = $('song').value;
   chordPractice.stop();
-  if (api && api.playerState === 1) api.playPause();
+  if (scoreView.api && scoreView.api.playerState === 1) scoreView.api.playPause();
   // 换曲目 = 换一份判定清单：清掉上一份（含光标对照表）
-  notes = null; notesMeta = null; session.noteIdx = 0; noteBeats = []; noteTicks = [];
+  notes = null; notesMeta = null; session.noteIdx = 0; scoreView.clearMap();
   if (songKind === 'chords') {
     await chordPractice.load();
     $('scoreWrap').style.display = 'none';
@@ -455,16 +179,13 @@ $('song').onchange = async () => {
     $('track').style.display = '';
     $('loop').style.display = '';
     // ⚠ 切曲目必须**重建** alphaTab（2026-09-23 用户报"切到茉莉花还显示 Hey Jude"）：
-    //   initAlphaTab() 开头是 `if (api) return api;` —— api 建过一次就返回旧实例，
-    //   谱面永远停在上一首。所以换谱之前先把旧的销毁、api/score 清空。
-    if (api && api.destroy) { try { api.destroy(); } catch (e) {} }
-    api = null; score = null;
-    // 谱面容器也清空 —— 万一 destroy() 不顶用（不同 alphaTab 版本行为不一样），
-    // 至少不会把两首谱画在同一个容器里。
-    if ($('score')) $('score').innerHTML = '';
+    //   scoreView.init() 开头是 `if (api) return api;` —— api 建过一次就返回旧实例，
+    //   谱面永远停在上一首。所以换谱之前先把旧的销毁、api/score 清空
+    //   （销毁实例 + 清空谱面容器都在 scoreView.destroy() 里）。
+    scoreView.destroy();
     const sc = scoreOf(songKind);
     if (sc && $('title')) $('title').textContent = sc.title;
-    initAlphaTab();
+    scoreView.init();
   }
 };
 
@@ -476,15 +197,15 @@ $('play').onclick = async () => {
     else { await chordPractice.load(); chordPractice.start(true); }        // 和弦谱试听：4 拍一个和弦，带声音
     return;
   }
-  initAlphaTab();
-  if (!api) { err('alphaTab 没加载起来。'); return; }
-  api.playPause();          // 按钮文字由 playerStateChanged 更新
+  scoreView.init();
+  if (!scoreView.api) { err('alphaTab 没加载起来。'); return; }
+  scoreView.api.playPause();          // 按钮文字由 playerStateChanged 更新
 };
 
 $('loop').onclick = () => {
-  if (!api) return;
-  api.isLooping = !api.isLooping;
-  $('loop').classList.toggle('on', api.isLooping);
+  if (!scoreView.api) return;
+  scoreView.api.isLooping = !scoreView.api.isLooping;
+  $('loop').classList.toggle('on', scoreView.api.isLooping);
 };
 
 // 模式切换：等我弹 / 跟节拍（两条路的推进规则不同，见 micTick 里的说明）
@@ -497,8 +218,8 @@ $('mode').onchange = () => {
 
 $('speed').onchange = () => {
   userBpm = Number($('speed').value) || 76;
-  if (songKind === 'heyjude' && api && score) {
-    api.playbackSpeed = userBpm / (score.tempo || 76);
+  if (songKind === 'heyjude' && scoreView.score) {
+    scoreView.setSpeed(userBpm / (scoreView.score.tempo || 76));
   } else if (chordPractice.isRunning()) {                 // 和弦练习：换速度要重排拍子
     chordPractice.stop(); chordPractice.start();
   }
@@ -638,11 +359,6 @@ const READ_GATE = globalThis.__readGate || 'b2';
 const READ_VETO_SEMIS = globalThis.__readVeto == null ? 2 : Number(globalThis.__readVeto);
 // 弦号 → 空弦音高（标准调弦）
 const OPEN_STRING_MIDI = { 1: 64, 2: 59, 3: 55, 4: 50, 5: 45, 6: 40 };
-// 会话记录：每个音的"期望 / 实测"，包含判定比值、周期性(clarity)、电平、时刻。
-// 这是**唯一能用来调参的数据**：录一遍干净的（只弹对的）就等于拿到标准答案，
-// 不用再靠"你猜我有没有弹对"。
-const slog = createSessionLog();
-const session = createSessionState();   // 会话状态：见 app/session-state.js   // 三个会话日志搬进 ./app/session-log.js
 // 起音台帐：**每一次**被判定为起音的事件都记一条（包括后来被判"不像琴声"丢掉的）。
 // 为什么要它：手机上出现"任何音都算对、一阵风过两三个音"，而这个现象在合成信号上
 // 复现不出来 —— 只能靠手机自己的台帐看"到底是什么被当成了起音"。
@@ -766,7 +482,7 @@ function tempo() {
         $('wrongs').textContent = '弹错：' + session.wrongList.join('、');
         $('missed').textContent = session.missed;
         $('bad').textContent = session.bad;
-        markNote(index, 'bad');
+        scoreView.markNote(index, 'bad');
         diag(`#${index + 1} ${midiToNameOf(note.midi)}(${note.string}弦${note.fret}品)`
           + ` 窗口 ${(winFrom / 1000).toFixed(2)}~${(winTo / 1000).toFixed(2)}s 没听到 → 错（漏）`);
         slog.session({
@@ -777,7 +493,7 @@ function tempo() {
       },
       // 光标跟着时钟走
       onCursor: (index, note) => {
-        highlightCurrent();
+        scoreView.highlightCurrent();
         if (note) $('next').innerHTML = `当前：<b>${midiToNameOf(note.midi)}</b>（${note.string}弦 ${note.fret}品）`;
       },
       onReanchor: (devMs) => diag(`↻ 重新对齐 ${devMs > 0 ? '+' : ''}${Math.round(devMs)}ms（后面按你的节奏走）`),
@@ -801,7 +517,7 @@ async function loadNotes() {
     //   buildTickMap() 是把"谱面拍点表"和"判定清单 notes"对起来的，
     //   而新谱接入时谱面先渲染完、notes 后到（或反过来），只跑一次就会出现
     //   "谱面出来了但没有光标"。这里 notes 一到位就补跑一次，两边就都齐了。
-    if (score) { try { buildTickMap(score, Number($('track') && $('track').value) || 0); } catch (e) {} }
+    scoreView.rebuildMap(Number($('track') && $('track').value) || 0);
   }
   return notes;
 }
@@ -856,7 +572,7 @@ function renderCells() {
         $('good').textContent = '0'; $('bad').textContent = '0';
         if ($('unclear')) $('unclear').textContent = '0';
         if ($('missed')) $('missed').textContent = '0';
-        highlightCurrent();
+        scoreView.highlightCurrent();
         setVerdict(`这一遍从第 ${i + 1} 个音开始：`
           + `<b>${midiToNameOf(notes[i].midi + pitchShift())}</b>`
           + `（${notes[i].string}弦 ${notes[i].fret}品）—— 点「跟弹」开始`, '');
@@ -865,7 +581,7 @@ function renderCells() {
     }
     box.appendChild(row);
   }
-  highlightCurrent();
+  scoreView.highlightCurrent();
 }
 function highlightCell(idx) {
   const box = $('cells');
@@ -978,7 +694,7 @@ function micTickBody() {
     setVerdict(couplingDetected
       ? '⚠ 检测到外放：手机把播放的声音也收进来了 —— 判定会失真，请戴耳机或关掉旋律，重新开始'
       : '开始 —— 弹第一个音', couplingDetected ? 'bad' : '');
-    highlightCurrent();                        // 开始就把光标摆到第一个音上
+    scoreView.highlightCurrent();                        // 开始就把光标摆到第一个音上
   }
   // ── 跟节拍 = 音驱动（2026-09-23 改口径）────────────────────────────────────
   // 用户的口径：光标**弹一个过一个**、弹错停下重弹；时间不再由时钟一格一格推着走，
@@ -1011,7 +727,7 @@ function micTickBody() {
         || !!(notes[session.noteIdx].chord && prevNote.chord && notes[session.noteIdx].chord !== prevNote.chord));
       session.countMissed();
       if (!session.wrongNoted.has(session.noteIdx)) { session.countBad(); session.wrongNoted.add(session.noteIdx); }
-      markNote(session.noteIdx, 'bad');
+      scoreView.markNote(session.noteIdx, 'bad');
       if ($('missed')) $('missed').textContent = String(session.missed);
       if ($('bad')) $('bad').textContent = String(session.bad);
       if ($('heard')) $('heard').textContent = isChange ? '换和弦没跟上' : '漏拍';
@@ -1347,7 +1063,7 @@ function micTickBody() {
         const last = slog.lastOnset();
         if (last) { last.dropped = 'not-a-string'; last.clarity = Number((a.pitch.clarity || 0).toFixed(3)); last.hz = Math.round(a.pitch.hz || 0); }
         // 这一下不算数（不像琴声）→ 把刚才预览挪过去的光标收回来
-        if (modeKind !== 'tempo') highlightCurrent();
+        if (modeKind !== 'tempo') scoreView.highlightCurrent();
       }
       micTimer = requestAnimationFrame(micTick);
       return;
@@ -1401,7 +1117,7 @@ function micTickBody() {
         if (!tempo().isAnchored()) {
           tempo().anchor(elapsed);
           session.noteIdx = 0;
-          highlightCurrent();
+          scoreView.highlightCurrent();
           const pickup = tempo().pickupCount();
           setVerdict(`起手对齐：以这一下为第 1 个音（${midiToNameOf(notes[0].midi)}）`
             + (pickup ? `　※ 这 ${pickup} 个音是起拍音（拾音），正拍从第 2 小节开始` : ''), '');
@@ -1694,7 +1410,7 @@ function micTickBody() {
           session.noteWrong(`第${(exp.measure || 0) + 1}小节 漏了${midiToNameOf(exp.midi)}（跳过去了）`);
           $('wrongs').textContent = '弹错/漏：' + session.wrongList.join('、');
           $('missed').textContent = session.missed;
-          markNote(best, 'bad');
+          scoreView.markNote(best, 'bad');
           slog.session({
             no: best + 1, t: Number((now / 1000).toFixed(3)),
             exp: exp.midi, expName: midiToNameOf(exp.midi), result: 'miss',
@@ -2317,7 +2033,7 @@ function micTickBody() {
       lastJudgeMs = onsetAtMs;
       if (passSlot) session.countGood();
       else if (firstWrong) { session.countBad(); session.wrongNoted.add(best); }
-      markNote(best, passSlot ? 'ok' : (unclear ? 'unclear' : 'bad'));   // 谱面上标对错
+      scoreView.markNote(best, passSlot ? 'ok' : (unclear ? 'unclear' : 'bad'));   // 谱面上标对错
       setVerdict(passSlot
         ? (slotSize > 1
           ? `✓ ${notes.slice(best, slotLast).map((n) => midiToNameOf(n.midi)).join(' + ')}（${slotSize} 个音都对）`
@@ -2369,8 +2085,8 @@ function micTickBody() {
       // 不会把后面整条对号顶错位（"弹快一点就跟不上"的根也在这儿）。
       // 判过 → 一次前进过**整格**（双音/三音一次拨弦就过这一格）；判错停在原地
       if (passSlot) { for (let k = 0; k < slotSize; k++) advanceNote(); }
-      else highlightCurrent();
-      if (api && exp.t != null) api.timePosition = (exp.t + (exp.dur || 0)) * 1000;
+      else scoreView.highlightCurrent();
+      if (scoreView.api && exp.t != null) scoreView.api.timePosition = (exp.t + (exp.dur || 0)) * 1000;
     }
     $('good').textContent = session.good;
     $('bad').textContent = session.bad;
@@ -2379,7 +2095,7 @@ function micTickBody() {
       : `${Math.min(session.noteIdx, notes.length)}/${notes.length}`;
     // 光标跟着谱面时间走（不是跟着你弹了几声走）
     // 光标（用高亮当光标）：只在判完一个音之后才挪 —— 你不弹它就不动。
-    highlightCurrent();
+    scoreView.highlightCurrent();
     // 光标提示：告诉用户"下一个该弹什么"，跟弹时不用猜
     if (songKind === 'heyjude' && notes && session.noteIdx < notes.length) {
       const nx = notes[session.noteIdx];
@@ -2478,7 +2194,7 @@ function advanceNote() {
     finishSession();
     return;
   }
-  highlightCurrent();
+  scoreView.highlightCurrent();
   const nx = notes[session.noteIdx];
   // ── 技巧：下一个音如果带 tech 标记，就在谱面该响的时刻自动判定它 ────────────
   // 只有一个起音（拨/击/滑的那一下），第二个音靠音高确认 —— 不再要求第二次起音。
@@ -2536,7 +2252,7 @@ async function startMic() {
   devHistory = [];
   Object.keys(devByString).forEach((k) => { delete devByString[k]; });
   // 谱面自己的速度：换速度练习时，时间轴按这个比例缩放
-  scoreTempo = (score && score.tempo) || userBpm;
+  scoreTempo = (scoreView.score && scoreView.score.tempo) || userBpm;
   $('wrongs').textContent = '';
   alignOffsetSec = null;
   micStartedAt = performance.now();
@@ -2547,11 +2263,11 @@ async function startMic() {
   tempo().reset();
   resetDiag();
   // 音符加载后重建"光标→谱面"对应表（按**当前选中的声部**）
-  if (score) buildTickMap(score, Number($('track') && $('track').value) || 0);
+  if (scoreView.score) scoreView.rebuildMap(Number($('track') && $('track').value) || 0);
   else await chordPractice.load();
   // 一开始就把光标画在"第一个该弹的音"上（以前要等判完第一个音才出现，
   // 用户看到的就是"光标没从第一个音开始"）。
-  highlightCurrent();
+  scoreView.highlightCurrent();
   // 倒计时期间**不判**（原来这里直接 waiting，所以数拍子的时候就已经在判了）
   phase = 'countin';
   modeKind = $('mode') ? $('mode').value : 'wait';
@@ -2566,15 +2282,15 @@ async function startMic() {
   // 跟弹时播放旋律当向导（成熟产品都这么做）：你跟着伴奏弹，时间自然对上。
   // 用耳机 —— 外放会被麦克风收进去。光标仍然只由"判到第几个音"驱动。
   guideOn = $('guide') ? $('guide').checked : false;
-  if (guideOn && songKind === 'heyjude' && api && api.score) {
+  if (guideOn && songKind === 'heyjude' && scoreView.api && scoreView.api.score) {
     try {
       const token = ++sessionToken;
-      applyTrack(Number($('track').value) || 0);
-      api.playbackSpeed = userBpm / (api.score.tempo || 76);
+      scoreView.applyTrack(Number($('track').value) || 0);
+      scoreView.api.playbackSpeed = userBpm / (scoreView.api.score.tempo || 76);
       // 只有"这一轮跟弹还在进行"时才播放：中途停止/切歌/点试听都不会再触发
       setTimeout(() => {
         if (token !== sessionToken || !micTimer) return;
-        try { api.play(); } catch (e) { /* ignore */ }
+        try { scoreView.api.play(); } catch (e) { /* ignore */ }
       }, (60 / userBpm) * 1000 * 4);
     } catch (e) { /* 播放器不可用就算了 */ }
   }
@@ -2596,10 +2312,10 @@ function stopMic() {
   cancelAnimationFrame(micTimer); micTimer = 0; phase = 'idle';
   sessionToken++;                       // 让还在等待的延时任务作废
   stopMetronome();                      // 节拍器也要停
-      if (cursorEngine && api) {
-    try { api.pause(); } catch (e) { /* ignore */ }
+      if (cursorEngine && scoreView.api) {
+    try { scoreView.api.pause(); } catch (e) { /* ignore */ }
     cursorEngine = false;
-    if (score) applyTrack(Number($('track').value) || 0);   // 还原原来选的声部
+    scoreView.applyTrack(Number($('track').value) || 0);   // 还原原来选的声部
   }
   audio.release();
   $('mic').textContent = '🎤 跟弹'; $('mic').classList.remove('on');
@@ -2626,30 +2342,27 @@ window.addEventListener('resize', () => {
   const now = isPhone();
   if (now === lastPhone) return;
   lastPhone = now;
-  if (api && score) {
-    // 旋转/改窗口时只调缩放，布局仍然是整页折行（保证手机上也是一页一页的谱子）
-    api.settings.display.scale = now ? 0.7 : 1;
-    api.render();
-  }
+  // 旋转/改窗口时只调缩放，布局仍然是整页折行（保证手机上也是一页一页的谱子）
+  scoreView.resize(now);
 });
 
-initAlphaTab();
+scoreView.init();
 // 版本号：**第一帧就写在标题上**（上一版藏在自检那行、还只在空的时候写，手机上根本没看到）
 if ($('title') && !$('title').textContent) $('title').textContent = 'v' + BUILD + ' 正在加载谱面…';
 // 版本号也写进「导出记录」旁边那一格（用户要看的就是这里）
 if ($('ver')) $('ver').textContent = 'v' + BUILD;
-window.__page = () => ({ songKind, userBpm, chordIdx: chordPractice.idx, beat, hasApi: !!api });
+window.__page = () => ({ songKind, userBpm, chordIdx: chordPractice.idx, beat, hasApi: !!scoreView.api });
 // 给离线分析用的钩子：拿到这一遍的逐音记录（导出按钮存的就是它）
 window.__vcSessionLog = () => slog.sessions;
 window.__vcOnsetLog = () => slog.onsets;
-window.__vcAlignInfo = () => alignInfo;
+window.__vcAlignInfo = () => scoreView.alignInfo;
 window.__vcSlots = (mockScore, trackIndex) => collectScoreSlots(mockScore, trackIndex);
 // 判定清单 → 光标位置的映射：离线回归要能单独测它（不开浏览器）
 window.__vcMap = (list, beats) => mapSequenceToSlots(list, beats);
 // 光标表本身（测"第 i 个音是不是指到第 i 个谱面位置"）
-window.__vcCursor = () => noteBeats.slice();
+window.__vcCursor = () => scoreView.noteBeats.slice();
 // 塞一份假谱面进去当"alphaTab 解析出来的结果"（离线回归整条链路时要走这一层）
-window.__vcSetScore = (s, trackIndex = 0) => { score = s; buildTickMap(s, trackIndex); };
+window.__vcSetScore = (s, trackIndex = 0) => { scoreView.setScore(s, trackIndex); };
 
 // ── 自检：页面上点一下，把"到底哪一环断了"直接打出来 ─────────────────────────
 // 导出记录：把这一遍每个音的"期望 / 实测"存成 JSON 文件。
@@ -2664,7 +2377,7 @@ const blob = new Blob([JSON.stringify({
   guide: !!($('guide') && $('guide').checked),
   metro: !!($('metro') && $('metro').checked),
   bpm: userBpm,
-  align: alignInfo,          // 谱面 × 时间轴的对齐结论（对不上时这里能看出来）
+  align: scoreView.alignInfo, // 谱面 × 时间轴的对齐结论（对不上时这里能看出来）
   notes: slog.sessions, onsets: slog.onsets,
   // ── 近似帧日志（2026-09-23 加，治"快弹漏音"）─────────────────────────────────
   // 用户说"确定是检测没起来"。这一份把**没被认成起音、但电平已经过了门限**的那些帧记下来，
@@ -2692,7 +2405,9 @@ $('selftest').onclick = async () => {
   }
   const el = $('score');
   lines.push(`谱面容器：${el.clientWidth}×${el.clientHeight}px，里面 ${el.children.length} 个元素`);
-  if (api && api.score) lines.push(`已解析：${api.score.title}，${api.score.tracks.length} 个声部，${api.score.masterBars.length} 小节`);
+  if (scoreView.api && scoreView.api.score) {
+    lines.push(`已解析：${scoreView.api.score.title}，${scoreView.api.score.tracks.length} 个声部，${scoreView.api.score.masterBars.length} 小节`);
+  }
   err('自检 → ' + lines.join(' ｜ '));
 };
 
