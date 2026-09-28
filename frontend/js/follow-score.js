@@ -11,11 +11,11 @@ const $ = (id) => document.getElementById(id);
 // 版本号：页面上会显示出来。**每次改代码都要改这里** ——
 // 浏览器（尤其手机）会缓存 JS，光刷新有时还是旧的；
 // 有了这个号，我们不用再猜"你跑的是哪一版"，看一眼就知道。
-const BUILD = '0928-1605';
+const BUILD = '0928-1622';
 const err = (m) => { $('err').textContent = m ? String(m) : ''; };
 const isPhone = () => window.innerWidth < 700;
 
-import { rms, spectrumOf } from './engine/dsp.js?v=0928-1605';
+import { rms, spectrumOf } from './engine/dsp.js?v=0928-1622';
 import * as audio from './audio.js';
 import {
   track, fluxRelOf, resetAnalysis, novelSpectrum, verifyExpectedNote, chordOutsiders,
@@ -24,12 +24,12 @@ import {
   lowBandRiseOf,
   shapeFluxOf, harmonicity, spectralSparsity, spectralFlatness, spectralPeakiness, f0SeriesFromDiff,
   dominantF0InBand, strongestF0InBand, diffMags, matchNoteByCandidates, readPluckF0,
-} from './engine/analysis.js?v=0928-1605';
-import { CFG, FLUX_N } from './engine/config.js?v=0928-1605';
-import { createMetro } from './metro-core.js';
+} from './engine/analysis.js?v=0928-1622';
+import { CFG, FLUX_N } from './engine/config.js?v=0928-1622';
+// （节拍器核心 metro-core.js 由 ./app/arp-cells.js 直接 import，这里不再用）
 // 分层：检测能力（起音层 / 判定层）各自一个文件，阈值也都收在那两个文件里。
-import { decideOnset, ONSET } from './engine/onset.js?v=0928-1605';
-import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js?v=0928-1605';
+import { decideOnset, ONSET } from './engine/onset.js?v=0928-1622';
+import { judgeNote, decideByCandidates, JUDGE } from './engine/judger.js?v=0928-1622';
 // 光标层：谱面格子 ↔ 判定清单 的对号（纯函数，单独一个文件）
 import { collectScoreSlots, mapSequenceToSlots } from './app/cursor.js';
 // 跟节拍层（状态机 + 拍点 + 提示音）—— 这一层只通过回调跟页面打交道
@@ -41,6 +41,7 @@ import { createChordPractice } from './app/chord-practice.js';
 import { createSessionLog } from './app/session-log.js';
 import { createSessionState } from './app/session-state.js';
 import { createScoreView } from './app/score-view.js';
+import { createArpCells } from './app/arp-cells.js';
 
 // api / score（alphaTab 实例和解析出来的谱面）已搬进 ./app/score-view.js —— 见下面的 scoreView。
 let songKind = 'heyjude';
@@ -101,7 +102,7 @@ const scoreView = createScoreView({
   getNotes: () => notes,
   isMicRunning: () => !!micTimer,
   setUserBpm: (v) => { userBpm = v; },
-  highlightCell: (idx) => highlightCell(idx),
+  highlightCell: (idx) => arpCells.highlightCell(idx),
   // 点谱面定位之后，页面要做的那些事（模块只管"点了第几个音"）
   onBeatPicked: (idx) => {
     // 从新的地方开始练：**旧的谱面标记要清掉**。
@@ -158,7 +159,7 @@ $('song').onchange = async () => {
     $('track').style.display = 'none';
     $('loop').style.display = 'none';
     await loadNotes();
-    renderCells();
+    arpCells.render();
     $('title').textContent = `C–Am–F–G · T3231323（逐音测试）— v${BUILD}`;
     setVerdict('逐音测试：点「跟弹」，按格子里写的弦/品一个一个弹（蓝色格子 = 当前该弹的）。');
   } else if (songKind === 'tech') {
@@ -169,7 +170,7 @@ $('song').onchange = async () => {
     $('track').style.display = 'none';
     $('loop').style.display = 'none';
     await loadNotes();
-    renderCells();
+    arpCells.render();
     $('title').textContent = `技巧练习 · 击弦/勾弦/滑音（逐音测试）— v${BUILD}`;
     setVerdict('技巧练习：每一对「拨一下 + 左手技巧」算两个音 —— 拨完不要停，让第二个音响出来。');
   } else {
@@ -522,108 +523,32 @@ async function loadNotes() {
   return notes;
 }
 
-// ── 无谱面测试（arp）：一排"音格子"，当前该弹的那个高亮 ──────────────────────
-function renderCells() {
-  const box = $('cells');
-  if (!box || !notes) return;
-  box.innerHTML = '';
-  const byMeasure = new Map();
-  notes.forEach((n, i) => {
-    const m = n.measure || 0;
-    if (!byMeasure.has(m)) byMeasure.set(m, []);
-    byMeasure.get(m).push({ n, i });
-  });
-  for (const [m, list] of byMeasure) {
-    const row = document.createElement('div');
-    row.className = 'row';
-    const tag = document.createElement('div');
-    tag.className = 'tag';
-    tag.textContent = list[0].n.chord || ('第' + (m + 1) + '小节');
-    row.appendChild(tag);
-    for (const { n, i } of list) {
-      const el = document.createElement('div');
-      el.className = 'cell';
-      el.id = 'cell' + i;
-      el.innerHTML = `<b>${midiToNameOf(n.midi + pitchShift())}</b>${n.string}弦${n.fret}品`;
-      // 点格子 = 从这一格开始练（和谱面那条路同一个口径：
-      //   只认这一次点击，这一遍从这儿起，下一遍仍旧从头）。
-      // 跟弹进行中不改起点 —— 中途换起点会让"已经判到哪"和"光标在哪"错开。
-      el.onclick = () => {
-        if (!notes || !notes[i]) return;
-        if (micTimer) {
-          setVerdict('跟弹进行中：先点「停止」，再点你想从哪一格开始');
-          return;
-        }
-        session.noteIdx = i;
-        session.pickedStart = true;
-        session.holdUntilMs = 0;
-        // 从新的地方开始练：**旧的标记要清掉**（跟谱面那条路的做法一致）——
-        // 不然新一段和上一段的绿/红混在一起，看不出这次练到哪、对错是哪一遍的。
-        if ($('marks')) $('marks').innerHTML = '';
-        const cellBox = $('cells');
-        if (cellBox && cellBox.querySelectorAll) {
-          cellBox.querySelectorAll('.cell.ok, .cell.bad').forEach((c) => {
-            if (c.classList) { c.classList.remove('ok'); c.classList.remove('bad'); }
-          });
-        }
-        session.resetWrongList(); session.resetWrongNoted();
-        session.resetMissCounts();
-        $('wrongs').textContent = '';
-        $('good').textContent = '0'; $('bad').textContent = '0';
-        if ($('unclear')) $('unclear').textContent = '0';
-        if ($('missed')) $('missed').textContent = '0';
-        scoreView.highlightCurrent();
-        setVerdict(`这一遍从第 ${i + 1} 个音开始：`
-          + `<b>${midiToNameOf(notes[i].midi + pitchShift())}</b>`
-          + `（${notes[i].string}弦 ${notes[i].fret}品）—— 点「跟弹」开始`, '');
-      };
-      row.appendChild(el);
-    }
-    box.appendChild(row);
-  }
-  scoreView.highlightCurrent();
-}
-function highlightCell(idx) {
-  const box = $('cells');
-  if (!box) return;
-  const prev = box.querySelector && box.querySelector('.cell.now');
-  if (prev && prev.classList) prev.classList.remove('now');
-  const el = document.getElementById('cell' + idx);
-  if (!el || !el.classList) return;
-  el.classList.add('now');
-  if (el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
-}
+// ── 音格子 + 倒计时 + 节拍器 ────────────────────────────────────────────────
+// 2026-09-28：renderCells / highlightCell / countIn / metro 整块搬进 ./app/arp-cells.js
+// （行为不变）。这里只做装配 —— 模块自己那件"节拍器实例"在它闭包里建。
+const arpCells = createArpCells({
+  $, audio, setVerdict, session,
+  midiToNameOf: (m) => midiToNameOf(m),      // 它在文件后面才声明，用到时再取
+  pitchShift: () => pitchShift(),
+  getNotes: () => notes,
+  getBpm: () => userBpm,
+  isMicRunning: () => !!micTimer,
+  highlightCurrent: () => scoreView.highlightCurrent(),
+  // 点了某一格之后，页面要做的那些事（模块只管"点了第几格"）
+  onCellPicked: (i) => {
+    session.resetWrongList(); session.resetWrongNoted();
+    session.resetMissCounts();
+    $('wrongs').textContent = '';
+    $('good').textContent = '0'; $('bad').textContent = '0';
+    if ($('unclear')) $('unclear').textContent = '0';
+    if ($('missed')) $('missed').textContent = '0';
+    scoreView.highlightCurrent();
+    setVerdict(`这一遍从第 ${i + 1} 个音开始：`
+      + `<b>${midiToNameOf(notes[i].midi + pitchShift())}</b>`
+      + `（${notes[i].string}弦 ${notes[i].fret}品）—— 点「跟弹」开始`, '');
+  },
+});
 
-function countIn(beats = 4) {
-  // 倒数这四拍同时也是**自听检测**的窗口（见 micTick 里的 coupling）：
-  // 这四拍用户还在等，如果他没在弹而麦克风却"听见"了四声清楚的响动，
-  // 那就是手机外放被自己收进去了 —— 那种情况下判定一定全错（听到的是伴奏本身）。
-  session.resetCountinPeaks();
-  const ms = (60 / userBpm) * 1000;
-  // 屏幕上的倒计时：4 → 3 → 2 → 1（跟四拍提示同一套时间）
-  const box = $('count');
-  box.classList.add('on');
-  for (let i = 0; i < beats; i++) setTimeout(() => { box.textContent = String(beats - i); }, i * ms);
-  setTimeout(() => { box.classList.remove('on'); box.textContent = ''; }, beats * ms);
-  const ctx = audio.getCtx();
-  if (!ctx) return;
-  for (let i = 0; i < beats; i++) {
-    const t = ctx.currentTime + 0.1 + (i * ms) / 1000;
-    const osc = ctx.createOscillator(), g = ctx.createGain();
-    osc.frequency.value = i === 0 ? 1320 : 880;
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(0.25, t + 0.005);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.09);
-    osc.connect(g); g.connect(ctx.destination);
-    osc.start(t); osc.stop(t + 0.12);
-  }
-}
-
-// 节拍器：用共用的核心（metro-core.js，和调试图是同一份实现）。
-// 检查模式（跟节拍）没有拍子参照没法用。
-const metro = createMetro({ getCtx: () => audio.getCtx() });
-function startMetronome() { return metro.start({ bpm: userBpm }); }
-function stopMetronome() { metro.stop(); }
 
 // 判定主循环外面包一层"防摔"：循环里任何一处抛异常，都会把整条 requestAnimationFrame
 // 链掐断 —— 用户看到的就是"卡死，再怎么弹都没反应"（2026-09-22 实测过一次：
@@ -2271,7 +2196,7 @@ async function startMic() {
   // 倒计时期间**不判**（原来这里直接 waiting，所以数拍子的时候就已经在判了）
   phase = 'countin';
   modeKind = $('mode') ? $('mode').value : 'wait';
-  countIn(4);                                   // 四拍提示，按用户设的速度
+  arpCells.countIn(4);                          // 四拍提示，按用户设的速度
   // 倒计时结束用主循环的时钟判断（不用 setTimeout）：判定和倒计时同一个时间源
   countInEndMs = performance.now() + (60 / userBpm) * 1000 * 4;
   // 跟弹时让 alphaTab 当"光标引擎"：所有声部静音后开始播放 ——
@@ -2301,7 +2226,7 @@ async function startMic() {
   // 用户要的是"光标走到哪响到哪"，不是抽象的拍子。
   // 节拍器 = 独立开关（2026-09-23）：跟节拍模式下也由它自己出声，
   // 只当参考、不参与判定（判定已经改成音驱动 + 总时间对账）。
-  if ($('metro') && $('metro').checked) startMetronome();
+  if ($('metro') && $('metro').checked) arpCells.start();
   $('mic').textContent = '⏹ 停止';
   $('mic').classList.add('on');
   setVerdict(`准备 —— 四拍后开始（${userBpm} BPM），弹错不停。`);
@@ -2311,7 +2236,7 @@ async function startMic() {
 function stopMic() {
   cancelAnimationFrame(micTimer); micTimer = 0; phase = 'idle';
   sessionToken++;                       // 让还在等待的延时任务作废
-  stopMetronome();                      // 节拍器也要停
+  arpCells.stop();                      // 节拍器也要停
       if (cursorEngine && scoreView.api) {
     try { scoreView.api.pause(); } catch (e) { /* ignore */ }
     cursorEngine = false;
