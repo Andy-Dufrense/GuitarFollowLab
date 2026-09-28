@@ -39,6 +39,7 @@ import { diag, resetDiag, initDiag } from './app/diag.js';
 // 和弦练习（卡片 / 试听 / 四拍轮转）—— 2026-09-28 整块搬出去，行为不变
 import { createChordPractice } from './app/chord-practice.js';
 import { createSessionLog } from './app/session-log.js';
+import { createSessionState } from './app/session-state.js';
 
 let api = null;            // alphaTab 实例（只建一次）
 let score = null;
@@ -642,7 +643,8 @@ const OPEN_STRING_MIDI = { 1: 64, 2: 59, 3: 55, 4: 50, 5: 45, 6: 40 };
 // 会话记录：每个音的"期望 / 实测"，包含判定比值、周期性(clarity)、电平、时刻。
 // 这是**唯一能用来调参的数据**：录一遍干净的（只弹对的）就等于拿到标准答案，
 // 不用再靠"你猜我有没有弹对"。
-const slog = createSessionLog();   // 三个会话日志搬进 ./app/session-log.js
+const slog = createSessionLog();
+const session = createSessionState();   // 会话状态：见 app/session-state.js   // 三个会话日志搬进 ./app/session-log.js
 // 起音台帐：**每一次**被判定为起音的事件都记一条（包括后来被判"不像琴声"丢掉的）。
 // 为什么要它：手机上出现"任何音都算对、一阵风过两三个音"，而这个现象在合成信号上
 // 复现不出来 —— 只能靠手机自己的台帐看"到底是什么被当成了起音"。
@@ -674,7 +676,7 @@ let timingTolMs = 0;        // 当前这个音的容许偏差
 // 自听检测（外放被自己收进去）：倒数四拍里麦克风"听见"了几声清楚的响动。
 // 为什么必须检测：手机实测"只弹了两个音，过去了 30 多个音，还全是对的" ——
 // 噪声不可能连出 30 个正确音高，能让每个音都对的只有一种声源：**伴奏/旋律本身**。
-let countinPeaks = 0;
+
 let couplingDetected = false;
 
 // ── 起音分离：三条判据（都是用户那 6 段真机录音逼出来的）────────────────────
@@ -883,7 +885,7 @@ function countIn(beats = 4) {
   // 倒数这四拍同时也是**自听检测**的窗口（见 micTick 里的 coupling）：
   // 这四拍用户还在等，如果他没在弹而麦克风却"听见"了四声清楚的响动，
   // 那就是手机外放被自己收进去了 —— 那种情况下判定一定全错（听到的是伴奏本身）。
-  countinPeaks = 0;
+  session.resetCountinPeaks();
   const ms = (60 / userBpm) * 1000;
   // 屏幕上的倒计时：4 → 3 → 2 → 1（跟四拍提示同一套时间）
   const box = $('count');
@@ -968,12 +970,12 @@ function micTickBody() {
   // 自听检测：倒数期间用户还在等，麦克风却响了好几下 → 我们在听自己放的伴奏
   if (phase === 'countin') {
     const back = levelHist.length >= 6 ? levelHist[levelHist.length - 6] : 0;
-    if (lv > Math.max(0.004, floor * 3) && lv > back * 1.6) countinPeaks++;
+    if (lv > Math.max(0.004, floor * 3) && lv > back * 1.6) session.bumpCountinPeaks();
   }
   if (phase === 'countin' && now >= countInEndMs) {
     phase = 'waiting';
     micStartedAt = now;
-    couplingDetected = countinPeaks >= 3;   // 四拍里听见三下以上就算自听
+    couplingDetected = session.selfListenDetected;   // 四拍里听见三下以上就算自听
     alignOffsetSec = null;
     noteClockStart = null;
     setVerdict(couplingDetected
