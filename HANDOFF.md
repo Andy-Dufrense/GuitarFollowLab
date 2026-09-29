@@ -240,6 +240,12 @@
 
 ## 六、目录结构
 
+> ⚠ **这一段是 2026-09-18 老页面的结构，已经不是现在仓库的样子**（老调试图那一簇
+> ——`main.js / judge.js / ui.js / state.js / exercises.js / metronome.js` 和
+> `test/test-dsp·test-live·test-detect·test-mic-fail·test-bughunt`——在 2026-09-28
+> 连同页面一起删掉了；算法搬到了 `backend/engine/`）。**现行目录看 `README.md` 的
+> 「目录」一节，分层规矩看 `frontend/js/结构.md`。** 下面这份只当历史留档。
+
 ```
 start.bat                    一键启动（默认不开浏览器；加 -o 才开）
 package.json                 npm start = node backend/server.js
@@ -301,18 +307,22 @@ node server.js
 
 ### 每次改完必跑
 
+> ⚠ **这五条命令全部失效了**（文件已删）。**现在跑这四条**（见 `AGENTS.md` /
+> `frontend/js/结构.md`）：
+
 ```
-node test/test-dsp.mjs        # DSP 内核
-node test/test-live.mjs       # 实时链路（含 60~160BPM 的琶音表、音准校准用例）
-node test/test-detect.mjs     # 检测能力（手机频响 / 余响 / 密集连弹 / 不消音）
-node test/test-mic-fail.mjs   # 麦克风开不了的各种情况
-node test/test-bughunt.mjs    # 变调夹/技巧/转换/静音/噪声/练完/音色无关性
+node test/gt-notes.mjs            :: 真机 39 拨弦，必须 39/39
+node test/test-follow-page.mjs    :: 产品页判定，必须「全部通过」
+node test/test-product-page.mjs   :: 产品页加载/装配，必须「全部通过」
+node test/check-build.mjs         :: 版本号一致，必须 ✅
 ```
 
-**五个都必须退出码 0。** 其中 bughunt 的 G 组（音色无关性）是这套东西的验收标准，
-改任何检测相关代码之后必须看它是不是还全过。
+**四条都要求通过。** 手上有真机录音时再加一条端到端：
+`VC_TIMELINE=<时间轴> node test/test-follow-real.mjs <录音.f32>`（已知答案，例如 6415 那条
+是 对 30 / 错 3）。音色无关性那条验收标准原来在 bughunt 的 G 组，**现在没有自动化回归**。
 
-改打分函数/阈值时，先跑这三个诊断脚本把数字打出来，别凭感觉调：
+改打分函数/阈值时，先把数字打出来再动手（下面这三个还都在；另外 `probe-estimator` /
+`probe-notes` / `probe-accuracy` 也是同一类）：
 
 ```
 node test/probe-flux.mjs
@@ -333,8 +343,12 @@ node test/probe-flat.mjs
 > ⚠️ 2026-09-20 实测：**这台机器上跑不了**。Chromium 报
 > `Sandbox cannot access executable E:\Lib\ms-playwright\...\chrome.exe: 拒绝访问`，
 > 加 `--no-sandbox` 也没用（它自己的沙箱检查在先）。这是文件权限问题，不是代码问题。
-> 替代做法：`test-live / test-detect / test-mic-fail` 都是加载**真实的 main.js** 跑主循环的，
-> 语法或装配错误一定会在那儿炸出来；再加上 `node --check frontend/js/*.js` 做静态检查。
+> 替代做法：`test/test-product-page.mjs` 会用 DOM 桩真加载一遍 `product.js`（模块里前面
+> 抛异常、按钮没挂上，都会在那儿报出来），`test/test-follow-page.mjs` / `test-follow-real.mjs`
+> 会真跑判定循环；再加 `node --check frontend/js/product.js`、`node --check frontend/js/app/*.js`
+> 做静态检查。
+> （这台机器上有真 Chromium 可用的路子：`vc_gf/pagecheck.py` / `songcheck.py`，
+> 见 `记忆同步-2026-09-24-收工状态.md` §9.1。）
 
 ---
 

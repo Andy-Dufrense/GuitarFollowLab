@@ -226,7 +226,8 @@ const html = `<!doctype html><meta charset="utf-8"><title>看频谱</title>
  button{background:#222;color:#cde;border:1px solid #345;border-radius:4px;padding:2px 8px;margin-right:4px;cursor:pointer}
 </style>
 <div class="c"><div class="hint">滚轮缩放 · 拖动平移 · 双击看全宽<br>
-<b>如果下面的图是黑的：说明这个页面被 Internet Explorer 打开了 —— 请用 Microsoft Edge 打开这个网址：http://localhost:1209/spectro.html</b></div></div>
+<b>如果下面的图是黑的：说明这个文件被 Internet Explorer 打开了 —— 请用 Microsoft Edge 打开这个 HTML 文件本身
+（它生成在 sound_data/f32/看频谱.html，不在网站的 /frontend 目录下，所以没有网址，直接双击文件打开）</b></div></div>
 ${clips.map((c, i) => `<div class="c"><p class="t"><b>${c.name}</b>　全长 ${c.seconds.toFixed(2)}s
 <button onclick="ZOOM(${i},-1)">＋</button><button onclick="ZOOM(${i},1)">－</button>
 <button onclick="FULL(${i})">全宽</button>

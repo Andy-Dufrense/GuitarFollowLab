@@ -2,6 +2,14 @@
 
 对着麦克风弹吉他，网页实时判断你弹对没有。纯本地、零依赖，不用 npm install。
 
+> ⚠ **这份 README 是"技术决策的记录"，里面有历史**。2026-09-28 把老的调试图
+> （`frontend/test/practice.html`、`follow-chips.html`、`main.js` 那一簇）整套删掉之后，
+> 下面提到"调试图 / 五个模式 / 右侧面板的节拍器滑块 / 高级设置"的段落都**没有对应页面了**，
+> 它们记录的是当时的做法。**要按现在的代码干活，看这几份**：
+> `AGENTS.md`（铁律 + 回归底线）→ `frontend/js/结构.md`（分层规矩 + 四道门）→
+> `记忆同步-2026-09-28-夜-收工状态.md`（最新状态与下一步）。
+> 这份 README 里**能照着跑的命令只有最后一节"跑回归"**那四条。
+
 ## 启动
 
 双击 **`start.bat`**：检查 Node → 起服务。**不会自己弹浏览器**，
@@ -92,7 +100,7 @@ start.bat -o         顺便用 Edge / Chrome 打开页面
 
 证书是自签名的，只在这台电脑上有效，10 年后过期。
 
-## 五个模式
+## 五个模式（老调试图的内容，页面已删）
 
 ## 节拍器（调灵敏度用）
 
@@ -182,9 +190,11 @@ A2 的二次谐波虽然正好落在 A3 的基频上，但这里查的是"110Hz 
 - **音准偏差会说实话**：偏差近半个音时目标音和隔壁半音打成平手，
   这时提示"先调弦"，而不是靠四舍五入蒙混过去。
 
-**验收标准是音色无关性**（`test-bughunt.mjs` 的 G 组）：
+**验收标准是音色无关性**：
 同一段 T3231323，用五种完全不同的音色渲染，必须全部通过——
 理想弦、亮音色、**基频只有 10%（手机麦克风常见）**、强非谐性（B=0.0015）、闷音色。
+（这条原来由 `test-bughunt.mjs` 的 G 组自动跑；那个文件 2026-09-28 随老页面删掉了，
+**现在音色无关性没有自动化回归**，要验只能手工做一段再拿 `test-follow-real.mjs` 量。）
 
 **2. 环境噪声和延音。** 起音判据是"电平比 48ms 前抬升 1.6 倍"，基准窗不能缩短——
 缩到 32ms 会让判定点提前，反而更容易被上一个音的余响带偏（实测 120BPM 会因此挂掉）。
@@ -361,41 +371,70 @@ package.json                 npm start = node backend/server.js
 
 frontend/
   index.html                 页面
-  live.css                   样式
-  js/config.js               全部可调参数和常量
+  js/product.js              **入口**（2026-09-28 由 follow-score.js 改名）：装配 + 按钮 + 钩子
   js/audio.js                麦克风采集、音频时钟、权限查询
-  js/analysis.js             信号分析：本底 / 双向失配打分 / YIN / 频谱通量
-  js/metronome.js            节拍器
-  js/dsp.js                  DSP 内核：YIN / FFT / Chroma / 和弦比对
-  js/data.js                 音高表和和弦指法库
+  js/metro-core.js           节拍器核心（产品页与离线测试共用）
+  js/app/                    页面能力，各管一件事（规则见 js/结构.md）
+      judge-loop.js          判定循环：起音帧 + judgeSettledFrame 四段 + 推进/收尾
+      score-view.js          alphaTab 渲染 + 光标 + 对错标记
+      tempo.js               跟节拍层（状态机 + 拍点 + 提示音）
+      arp-cells.js           音格子 + 倒计时 + 节拍器
+      chord-practice.js      和弦练习（卡片 / 试听 / 四拍轮转）
+      session-state.js       会话状态（唯一真相）
+      session-log.js         三本账（逐音 / 起音 / 近失）
+      cursor.js              谱面格 ↔ 判定清单对号（纯函数）
+      diag.js                诊断面板
+  js/engine/*.js            6 个转接文件 → backend/engine/*.js（都带 ?v= 版本号）
+  data/                      谱面 .gp* + 时间轴 JSON（hey_jude / chinese-jasmine /
+                             chord_arp / tech_practice / chord_practice）
+  vendor/                    alphaTab.min.js + Bravura 字体 + sonivox 音色库（全本地，无 CDN）
+
+（`frontend/test/` 整个目录已在 2026-09-29 删除 —— 它只剩一个导航页，而导航页链的
+  practice.html / follow-chips.html 早在 9-28 就删了；老调试图的样式 live.css 一并删掉。）
 
 backend/
   server.js                  静态服务器：http 1209 + https 1210
+                             （并把 /backend/engine/ 只读暴露给页面）
+  engine/                    **真正的算法**：dsp / analysis / onset / judger / config / data
+                             （起音 / 读数 / 判定三层；HomeworkGrader 也 import 同一份）
+  tools/gp_timeline.py       .gp → 时间轴 JSON（依赖 PyGuitarPro，装在 E:\VirtuCoach-Lib）
   make-cert.bat / .ps1       生成手机用的证书（手机必须 https 才拿得到麦克风）
+  renew-server-cert.ps1      换 IP 后只重签叶子证书（手机不必重装根证书）
   certs/                     证书（root 的 .cer 给手机装，leaf 的 .pfx 服务器用）
 
 test/
-  test-dsp.mjs               DSP 内核（合成信号，不需要麦克风）
-  test-live.mjs              整条实时链路的端到端测试（假麦克风）
-  test-detect.mjs            **检测能力**专项：手机麦克风频响 / 和弦余响里的低音弦 / 密集连弹 / 完全不消音
-  test-bughunt.mjs           挖 bug：变调夹 / 技巧 / 转换 / 静音 / 纯噪声 / 练完 / 音色无关性
-  probe-flux.mjs             诊断：起音判据的两个读数（电平抬升 / 频谱通量）在各场景下是多少
-  probe-octave.mjs           诊断：和弦余响里判高八度，问题出在吸收速度还是打分函数
-  probe-flat.mjs             诊断：音准偏离多少音分时，"挪半个音更不像"这件事怎么表现
+  （2026-09-28 随老页面一起删掉了 test-dsp / test-live / test-detect /
+    test-mic-fail / test-bughunt —— 它们测的是已删除的调试图那条链路）
+  gt-notes.mjs               真机 39 个拨弦的双向底线（必须 39/39）
+  test-follow-page.mjs       产品页判定的合成回归（主回归）
+  test-product-page.mjs      产品页能不能加载 / 每个按钮有没有挂上（DOM 桩）
+  check-build.mjs            版本号一致性（BUILD + 所有 ?v=，必须 ✅）
+  metro.mjs                  节拍器：不累积抖动 / 卡住不补响 / 起振必须软
+  test-outsiders.mjs         和弦外音检测
+  test-follow-real.mjs       用真机录音跑产品页判定（可用 VC_TIMELINE / VC_MODE 换靶子）
+  grade.mjs                  批量评分（每段录音起独立进程跑，写 grade-*.json）
+  cmp-tracks.mjs             谱面解析出的音序列 vs 判定时间轴
+  analyze-log.mjs            离线分析「导出记录」（json/follow-log-*.json）
+  report.mjs / spectro.mjs   生成 report-*.html / 看频谱.html（看图排错）
+  probe-*.mjs / probe-gp3-beats.py   离线探针（音高估计器 / 起音 / 谐波 / 谱面基准…）
 
-.gp/                         真实 Guitar Pro 文件（跟弹模式的时间轴素材，待接入）
+.gp/                         真实 Guitar Pro 文件（谱面素材与会用到的练习谱）
+json/                        手机「导出记录」攒下的会话日志（分析用）
+sound_data/                  真机录音（.m4a 原件 + f32/ 转换后的分析素材）
 ```
 
 ### 分层与依赖方向
 
 ```
-main.js  ← 只做调度：读一帧 → 分析层 → 判定层 → 界面层
-  ├─ analysis.js  → dsp.js, config.js
-  ├─ judge.js     → state, analysis, ui, dsp, metronome
-  ├─ metronome.js → state, ui, audio
-  ├─ ui.js        → config, state, audio
-  ├─ audio.js     → config
-  └─ state.js     → config, exercises
+product.js  ← 只做装配：建状态、建各层、挂按钮事件、启动
+  ├─ app/judge-loop.js   判定循环：起音帧 → judgeSettledFrame（起音验证 / 读数+判定 /
+  │                      结论 / 收尾）＋ 推进、收尾
+  │     └─ engine/*.js → backend/engine/*.js    信号与判定（只许调用）
+  ├─ app/score-view.js   alphaTab 渲染 + 光标
+  ├─ app/arp-cells.js    音格子 + 倒计时 + 节拍器 → js/metro-core.js
+  ├─ app/tempo.js / chord-practice.js / session-state.js / session-log.js
+  ├─ app/cursor.js / diag.js   纯工具
+  └─ js/audio.js         麦克风
 ```
 
 依赖单向，没有环。浏览器原生支持 ES module，**拆完依然不需要任何构建工具**，
@@ -403,26 +442,24 @@ main.js  ← 只做调度：读一帧 → 分析层 → 判定层 → 界面层
 
 几个边界是刻意划的：
 
-- **算法不认识界面**：`analysis.js` 里是纯函数，上层给 buffer，它还结果；
+- **算法不认识界面**：`backend/engine/analysis.js` 里是纯函数，上层给 buffer，它还结果；
   它自己的跨帧状态（噪声谱、上一帧频谱）自己管，不往共享状态里塞。
-- **界面不做判定**：`ui.js` 只管把状态画出来。
-- **判定策略集中在 `judge.js`**：单音的音名比对、八度归属、频谱差分兜底、
-  和弦指纹比对、听不清时的补测顺序，全在一个文件里，改判定不用翻别处。
+- **同层不许互相 import**：`app/` 下的模块各有各的闭包状态，共享的东西进
+  `app/session-state.js`（唯一真相），绝不各存一份。
+- **判定策略集中在 `engine/judger.js` + `app/judge-loop.js`**：候选重排、判过规则、
+  多音格两道门、技巧路径，全在这两处；`backend/engine/` 三层铁律是只许调用。
 
-> **踩过的坑**：拆完之后测试开始互相污染。原因是状态搬到了 `state.js`，
-> 而测试用 `?case=X` 只让入口重新加载，`state.js` 是共享的。
-> 这也暴露了缺一样东西——应用需要一个正式的复位入口，于是补了 `resetApp()`。
-> 但 `CFG`（用户设置，比如变调夹）它**不清**：真实使用中你换过变调夹，
-> 复位练习进度不该把它清掉。测试要自己记得归零。
+> **踩过的坑**：模块拆完后，`micTickBody` 一个函数还能摸到 71 个顶层变量 ——
+> 曾经把 `lastOnsetMs` 和 `onsetAtMs` 赋成同一个值，害得"抢拍/拖拍"几个月没生效。
+> 加新功能时的检查单见 `frontend/js/结构.md`。
 
-跑测试（**五个都必须退出码 0**）：
+跑回归（改前端 JS 必跑前四条，**都要求通过**）：
 
 ```
-node test/test-dsp.mjs
-node test/test-live.mjs
-node test/test-detect.mjs
-node test/test-mic-fail.mjs
-node test/test-bughunt.mjs
+node test/gt-notes.mjs            :: 真机 39 拨弦，必须 39/39
+node test/test-follow-page.mjs    :: 产品页判定，必须「全部通过」
+node test/test-product-page.mjs   :: 产品页加载/装配，必须「全部通过」
+node test/check-build.mjs         :: 版本号一致，必须 ✅
 ```
 
 ## 音高表
